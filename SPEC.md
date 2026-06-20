@@ -15,9 +15,9 @@ behavior.
 
 ## 1. Problem Statement
 
-Symphony is a long-running automation service that continuously reads work from an issue tracker
-(Linear in this specification version), creates an isolated workspace for each issue, and runs a
-coding agent session for that issue inside the workspace.
+Symphony is a long-running automation service that continuously reads work from an issue
+tracker (Linear or Beads in this specification version), creates an isolated workspace for each
+issue, and runs a coding agent session for that issue inside the workspace.
 
 The service solves four operational problems:
 
@@ -129,7 +129,7 @@ Symphony is easiest to port when kept in these layers:
 4. `Execution Layer` (workspace + agent subprocess)
    - Filesystem lifecycle, workspace preparation, coding-agent protocol.
 
-5. `Integration Layer` (Linear adapter)
+5. `Integration Layer` (tracker adapter)
    - API calls and normalization for tracker data.
 
 6. `Observability Layer` (logs + OPTIONAL status surface)
@@ -137,10 +137,12 @@ Symphony is easiest to port when kept in these layers:
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
+- Issue tracker API or CLI (Linear GraphQL API for `tracker.kind == "linear"`; `bd` CLI for
+  `tracker.kind == "beads"`).
 - Local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
-- Coding-agent executable that supports the targeted Codex app-server mode.
+- Coding-agent executable that supports the targeted agent mode (`codex` app-server or `pi` RPC
+  mode).
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
@@ -231,13 +233,13 @@ Fields:
 - `session_id` (string, `<thread_id>-<turn_id>`)
 - `thread_id` (string)
 - `turn_id` (string)
-- `codex_app_server_pid` (string or null)
-- `last_codex_event` (string/enum or null)
-- `last_codex_timestamp` (timestamp or null)
-- `last_codex_message` (summarized payload)
-- `codex_input_tokens` (integer)
-- `codex_output_tokens` (integer)
-- `codex_total_tokens` (integer)
+- `agent_pid` (string or null)
+- `last_agent_event` (string/enum or null)
+- `last_agent_timestamp` (timestamp or null)
+- `last_agent_message` (summarized payload)
+- `agent_input_tokens` (integer)
+- `agent_output_tokens` (integer)
+- `agent_total_tokens` (integer)
 - `last_reported_input_tokens` (integer)
 - `last_reported_output_tokens` (integer)
 - `last_reported_total_tokens` (integer)
@@ -269,8 +271,8 @@ Fields:
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
-- `codex_totals` (aggregate tokens + runtime seconds)
-- `codex_rate_limits` (latest rate-limit snapshot from agent events)
+- `agent_totals` (aggregate tokens + runtime seconds)
+- `agent_rate_limits` (latest rate-limit snapshot from agent events)
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -332,7 +334,9 @@ Top-level keys:
 - `workspace`
 - `hooks`
 - `agent`
+- `agent_kind`
 - `codex`
+- `pi`
 
 Unknown keys SHOULD be ignored for forward compatibility.
 
@@ -343,30 +347,58 @@ Note:
 - Extensions SHOULD document their field schema, defaults, validation rules, and whether changes
   apply dynamically or require restart.
 
+##### `agent_kind` (string)
+
+- Default: `codex`.
+- Selects which coding-agent integration the runtime uses for this workflow.
+- Current supported values:
+  - `codex` — use the Codex app-server integration defined in Section 10.
+  - `pi` — use the Pi RPC integration defined in Section 10.2.
+- Changes to `agent_kind` generally require a new worker run because the underlying process runtime
+  and protocol differ; implementations are not REQUIRED to hot-swap an in-flight agent from one
+  integration to another.
+- When `agent_kind` is absent, implementations MUST default to `codex` for backward compatibility
+  with existing `WORKFLOW.md` files.
+
 #### 5.3.1 `tracker` (object)
 
 Fields:
 
 - `kind` (string)
   - REQUIRED for dispatch.
-  - Current supported value: `linear`
+  - Current supported values: `linear`, `beads`.
 - `endpoint` (string)
-  - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`
+  - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`.
+  - NOT used for `tracker.kind == "beads"`.
 - `api_key` (string)
   - MAY be a literal token or `$VAR_NAME`.
   - Canonical environment variable for `tracker.kind == "linear"`: `LINEAR_API_KEY`.
+  - NOT used for `tracker.kind == "beads"`.
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
 - `project_slug` (string)
   - REQUIRED for dispatch when `tracker.kind == "linear"`.
+  - NOT used for `tracker.kind == "beads"`.
 - `required_labels` (list of strings)
   - Default: `[]`.
-  - An issue MUST contain every configured label to dispatch or continue.
-  - Matching ignores case and surrounding whitespace.
-  - A blank configured label matches no issue.
+  - For `tracker.kind == "linear"`: an issue MUST contain every configured label to dispatch or
+    continue. Matching ignores case and surrounding whitespace. A blank configured label matches
+    no issue.
+  - NOT used for `tracker.kind == "beads"`.
 - `active_states` (list of strings)
-  - Default: `Todo`, `In Progress`
+  - Default: `Todo`, `In Progress` for `linear`; `open`, `in_progress` for `beads`.
+  - Implementations SHOULD provide tracker-kind-specific defaults that match the tracker's native
+    state vocabulary.
 - `terminal_states` (list of strings)
-  - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
+  - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done` for `linear`; `closed`,
+    `tombstone` for `beads`.
+  - Implementations SHOULD provide tracker-kind-specific defaults that match the tracker's native
+    state vocabulary.
+- `bd_command` (string)
+  - Shell command for the `bd` CLI.
+  - Default: `bd`.
+  - Applies only when `tracker.kind == "beads"`.
+  - The runtime launches this command via `bash -lc` in the workspace directory or bead database
+    directory.
 
 #### 5.3.2 `polling` (object)
 
@@ -429,7 +461,7 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.6 `codex` (object)
+#### 5.3.7 `codex` (object)
 
 Fields:
 
@@ -459,6 +491,59 @@ fields locally if they want stricter startup checks.
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
 
+#### 5.3.8 `pi` (object)
+
+Fields:
+
+The `pi` section configures the Pi coding-agent integration and is used only when
+`agent_kind == "pi"`. Implementations MUST ignore these fields when `agent_kind == "codex"`.
+
+- `command` (string shell command)
+  - Default: `pi`.
+  - The runtime launches this command via `bash -lc` in the workspace directory.
+  - The launched process MUST speak the Pi RPC protocol over stdio.
+  - Implementations SHOULD launch with `--mode rpc --no-session` unless the implementation
+    explicitly manages persistent Pi sessions across worker runs.
+- `provider` (string)
+  - Default: implementation-defined.
+  - Passed to Pi as `--provider` when starting RPC mode.
+  - Maps to Pi provider identifiers such as `anthropic`, `openai`, `google`, or custom provider
+    names.
+- `model` (string)
+  - Default: implementation-defined.
+  - Either a model ID or a provider/model pattern accepted by Pi
+    (for example `anthropic/claude-sonnet-4-20250514` or `openai/gpt-4o`).
+  - If omitted, Pi uses its own default model selection rules.
+- `approval_policy` (string or map)
+  - Default: implementation-defined.
+  - Controls how Pi handles the extension UI approval protocol in RPC mode.
+  - Implementations MAY define accepted string values (for example `auto`, `operator`, `strict`) or
+    a structured policy object. The implementation MUST document the accepted shape.
+- `session_sync` (string)
+  - Default: `none`.
+  - Controls whether Pi session data is synchronized after the worker run.
+  - Accepted values:
+    - `none` — do not sync or export session data.
+    - `export` — export the session to an implementation-defined location or format after the run.
+    - `sync` — synchronize session data with a remote destination if configured.
+  - Implementations MUST document what `export` and `sync` do and where data is stored.
+- `read_timeout_ms` (integer)
+  - Default: `5000`.
+  - Request/response timeout used during Pi RPC startup and synchronous commands.
+- `turn_timeout_ms` (integer)
+  - Default: `3600000` (1 hour).
+  - Total turn stream timeout for a single Pi agent turn or continuation turn.
+- `stall_timeout_ms` (integer)
+  - Default: `300000` (5 minutes).
+  - If `<= 0`, stall detection is disabled.
+  - Elapsed time is computed from the last Pi event timestamp or from the worker start time when
+    no event has been received yet.
+
+For Pi-owned config values such as `provider`, `model`, and extension UI behavior, supported values
+are defined by the targeted Pi version. Implementations SHOULD consult the Pi documentation or
+generated schema instead of treating this specification as a protocol schema. If this specification
+appears to conflict with the Pi protocol, the Pi protocol controls protocol shape and behavior.
+
 ### 5.4 Prompt Template Contract
 
 The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
@@ -480,7 +565,7 @@ Template input variables:
 Fallback prompt behavior:
 
 - If the workflow prompt body is empty, the runtime MAY use a minimal default prompt
-  (`You are working on an issue from Linear.`).
+  (`You are working on an issue from the configured tracker.`).
 - Workflow file read/parse failures are configuration/validation errors and SHOULD NOT silently fall
   back to a prompt.
 
@@ -565,9 +650,14 @@ Validation checks:
 
 - Workflow file can be loaded and parsed.
 - `tracker.kind` is present and supported.
-- `tracker.api_key` is present after `$` resolution.
-- `tracker.project_slug` is present when REQUIRED by the selected tracker kind.
-- `codex.command` is present and non-empty.
+- `tracker.api_key` is present after `$` resolution when `tracker.kind == "linear"`.
+- `tracker.project_slug` is present when REQUIRED by the selected tracker kind
+  (`tracker.kind == "linear"` requires it).
+- `tracker.bd_command` is present and non-empty when `tracker.kind == "beads"`.
+- `bd` CLI is reachable when `tracker.kind == "beads"` (for example `tracker.bd_command --version`).
+- `codex.command` is present and non-empty when `agent_kind == "codex"`.
+- `pi.command` is present and non-empty when `agent_kind == "pi"`.
+- Pi CLI is reachable when `agent_kind == "pi"` (for example `pi.command --version` or `pi.command --help`).
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
 
@@ -575,13 +665,21 @@ This section is intentionally redundant so a coding agent can implement the conf
 Extension fields are documented in the extension section that defines them. Core conformance does
 not require recognizing or validating extension fields unless that extension is implemented.
 
-- `tracker.kind`: string, REQUIRED, currently `linear`
-- `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
-- `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
-- `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
-- `tracker.required_labels`: list of strings, default `[]`
-- `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
-- `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `tracker.kind`: string, REQUIRED, currently `linear` or `beads`
+- For `tracker.kind=linear`:
+  - `tracker.endpoint`: string, default `https://api.linear.app/graphql`
+  - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY`
+  - `tracker.project_slug`: string, REQUIRED
+- For `tracker.kind=beads`:
+  - `tracker.bd_command`: shell command string, default `bd`
+  - `tracker.endpoint`, `tracker.api_key`, and `tracker.project_slug` are NOT used and SHOULD be
+    ignored if present
+- Common tracker fields:
+  - `tracker.required_labels`: list of strings, default `[]` (Linear only; ignored for Beads)
+  - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]` for Linear,
+    `["open", "in_progress"]` for Beads
+  - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled",
+    "Duplicate", "Done"]` for Linear, `["closed", "tombstone"]` for Beads
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -600,6 +698,15 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
+- `agent_kind`: string, default `codex`; supported values are `codex` and `pi`
+- `pi.command`: shell command string, default `pi`; used when `agent_kind == "pi"`
+- `pi.provider`: string, default implementation-defined; used when `agent_kind == "pi"`
+- `pi.model`: string, default implementation-defined; used when `agent_kind == "pi"`
+- `pi.approval_policy`: string or map, default implementation-defined; used when `agent_kind == "pi"`
+- `pi.session_sync`: string, default `none`; used when `agent_kind == "pi"`
+- `pi.read_timeout_ms`: integer, default `5000`; used when `agent_kind == "pi"`
+- `pi.turn_timeout_ms`: integer, default `3600000`; used when `agent_kind == "pi"`
+- `pi.stall_timeout_ms`: integer, default `300000`; used when `agent_kind == "pi"`
 
 ## 7. Orchestration State Machine
 
@@ -728,6 +835,9 @@ An issue is dispatch-eligible only if all are true:
 - Its state is in `active_states` and not in `terminal_states`.
 - It is routed to this worker by the configured assignee and contains every
   label in `tracker.required_labels`.
+  - This rule applies only when `tracker.kind == "linear"` and `required_labels` is non-empty.
+  - For `tracker.kind == "beads"`, routing is implementation-defined (for example by assignee,
+    issue metadata, or CLI scoping) and MUST be documented.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -791,10 +901,14 @@ Reconciliation runs every tick and has two parts.
 Part A: Stall detection
 
 - For each running issue, compute `elapsed_ms` since:
-  - `last_codex_timestamp` if any event has been seen, else
+  - `last_agent_event_timestamp` if any event has been seen, else
   - `started_at`
-- If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
-- If `stall_timeout_ms <= 0`, skip stall detection entirely.
+- For `agent_kind == "codex"`: if `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue
+  a retry.
+- For `agent_kind == "pi"`: if `elapsed_ms > pi.stall_timeout_ms`, terminate the worker and queue a
+  retry.
+- The generic stall timeout field for the active agent kind is used; if the inactive agent kind's
+  timeout is `<= 0`, stall detection for that kind is disabled.
 
 Part B: Tracker state refresh
 
@@ -913,21 +1027,30 @@ Invariant 3: Workspace key is sanitized.
 
 ## 10. Agent Runner Protocol (Coding Agent Integration)
 
-This section defines Symphony's language-neutral responsibilities when integrating a Codex
-app-server. The Codex app-server protocol for the targeted Codex version is the source of truth for
+This section defines Symphony's language-neutral responsibilities when integrating a coding-agent
+runtime. Two integrations are defined in this version:
+
+1. `codex` — the Codex app-server integration (Section 10.1).
+2. `pi` — the Pi RPC integration (Section 10.2).
+
+The targeted coding-agent protocol for the selected `agent_kind` is the source of truth for
 protocol schemas, message payloads, transport framing, and method names.
 
 Protocol source of truth:
 
-- Implementations MUST send messages that are valid for the targeted Codex app-server version.
-- Implementations MUST consult the targeted Codex app-server documentation or generated schema
-  instead of treating this specification as a protocol schema.
-- If this specification appears to conflict with the targeted Codex app-server protocol, the Codex
-  protocol controls protocol shape and transport behavior.
+- Implementations MUST send messages that are valid for the targeted coding-agent protocol version.
+- Implementations MUST consult the targeted coding-agent documentation or generated schema instead
+  of treating this specification as a protocol schema.
+- If this specification appears to conflict with the targeted coding-agent protocol, that protocol
+  controls protocol shape and transport behavior.
 - Symphony-specific requirements in this section still control orchestration behavior, workspace
   selection, prompt construction, continuation handling, and observability extraction.
 
-### 10.1 Launch Contract
+### 10.1 Codex App-Server Integration
+
+This section applies when `agent_kind == "codex"`.
+
+#### 10.1.1 Launch Contract
 
 Subprocess launch parameters:
 
@@ -946,7 +1069,7 @@ RECOMMENDED additional process settings:
 
 - Max line size: 10 MB (for safe buffering)
 
-### 10.2 Session Startup Responsibilities
+#### 10.1.2 Session Startup Responsibilities
 
 Reference: https://developers.openai.com/codex/app-server/
 
@@ -974,7 +1097,7 @@ Session identifiers:
 - Emit `session_id = "<thread_id>-<turn_id>"`
 - Reuse the same `thread_id` for all continuation turns inside one worker run
 
-### 10.3 Streaming Turn Processing
+#### 10.1.3 Streaming Turn Processing
 
 The client processes app-server updates according to the targeted Codex app-server protocol until
 the active turn terminates.
@@ -984,7 +1107,7 @@ Completion conditions:
 - Targeted-protocol turn completion signal -> success
 - Targeted-protocol turn failure signal -> failure
 - Targeted-protocol turn cancellation signal -> failure
-- turn timeout (`turn_timeout_ms`) -> failure
+- turn timeout (`codex.turn_timeout_ms`) -> failure
 - subprocess exit -> failure
 
 Continuation processing:
@@ -1000,14 +1123,14 @@ Transport handling requirements:
 - For stdio-based transports, keep protocol stream handling separate from diagnostic stderr
   handling unless the targeted protocol specifies otherwise.
 
-### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
+#### 10.1.4 Emitted Runtime Events (Upstream to Orchestrator)
 
 The app-server client emits structured events to the orchestrator callback. Each event SHOULD
 include:
 
 - `event` (enum/string)
 - `timestamp` (UTC timestamp)
-- `codex_app_server_pid` (if available)
+- `agent_pid` (if available)
 - OPTIONAL `usage` map (token counts)
 - payload fields as needed
 
@@ -1026,7 +1149,255 @@ Important emitted events include, for example:
 - `other_message`
 - `malformed`
 
-### 10.5 Approval, Tool Calls, and User Input Policy
+#### 10.1.5 Timeouts and Error Mapping
+
+Timeouts:
+
+- `codex.read_timeout_ms`: request/response timeout during startup and sync requests
+- `codex.turn_timeout_ms`: total turn stream timeout
+- `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+
+Error mapping (RECOMMENDED normalized categories):
+
+- `codex_not_found`
+- `invalid_workspace_cwd`
+- `response_timeout`
+- `turn_timeout`
+- `port_exit`
+- `response_error`
+- `turn_failed`
+- `turn_cancelled`
+- `turn_input_required`
+
+### 10.2 Pi RPC Integration
+
+This section applies when `agent_kind == "pi"`.
+
+Reference: https://pi.dev/docs/latest/rpc
+
+Protocol overview:
+
+- Pi RPC mode enables headless operation of the coding agent via a JSON protocol over stdin/stdout.
+- Commands are JSON objects sent to stdin, one per line.
+- Responses are JSON objects with `type: "response"` indicating command success or failure.
+- Events are agent events streamed to stdout as JSON lines.
+- All commands support an optional `id` field for request/response correlation.
+
+Framing requirements:
+
+- The Pi RPC client MUST use strict JSONL semantics with LF (`\n`) as the only record delimiter.
+- The client MUST split records on `\n` only.
+- The client MUST accept optional `\r\n` input by stripping a trailing `\r`.
+- The client MUST NOT use generic line readers that treat Unicode separators as newlines.
+
+#### 10.2.1 Launch Contract
+
+Subprocess launch parameters:
+
+- Command: `pi.command`
+- Recommended invocation: `bash -lc "<pi.command> --mode rpc --no-session"`
+- Working directory: workspace path
+- Transport/framing: Pi RPC JSONL over stdio
+
+Notes:
+
+- The default command is `pi`.
+- `provider` and `model` are supplied as CLI arguments if configured in front matter
+  (for example `--provider <pi.provider> --model <pi.model>`).
+- Implementations MAY omit `--no-session` only if they explicitly manage persistent Pi sessions and
+  document the lifecycle semantics.
+- The implementation MUST verify the launched process speaks the Pi RPC protocol before treating it
+  as a valid agent runtime.
+
+RECOMMENDED additional process settings:
+
+- Max line size: 10 MB (for safe buffering)
+
+#### 10.2.2 Session Startup Responsibilities
+
+Startup MUST follow the Pi RPC protocol. Symphony additionally requires the client to:
+
+- Start the Pi subprocess in the per-issue workspace.
+- Send the initial prompt using the `prompt` RPC command with the rendered issue prompt as
+  `message`.
+- Supply the absolute per-issue workspace context. When the Pi protocol supports working-directory
+  configuration (for example through CLI flags, environment, or prompt instructions), the
+  implementation MUST pass the workspace path. If the protocol does not expose a cwd mechanism,
+  the implementation MUST document how workspace confinement is achieved.
+- Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, in the initial
+  prompt when the implementation's prompt template contract supports it.
+- Advertise implemented client-side tools using the mechanism supported by the targeted Pi version
+  if applicable.
+
+Session identifiers:
+
+- Pi RPC mode does not expose `thread_id` and `turn_id` as first-class concepts in the same way as
+  Codex app-server.
+- The implementation MUST derive a stable `session_id` from Pi session metadata or process lifetime.
+- A conforming implementation MAY use the Pi `sessionId` from `get_state` responses, the CLI
+  `--name` argument, or another stable process-scoped identifier.
+- The implementation MUST document the chosen `session_id` derivation.
+
+#### 10.2.3 Session State and Model Management
+
+If the implementation exposes runtime model or state controls, it MAY use the Pi RPC commands
+listed below. Use of these commands is OPTIONAL unless the implementation documents them as part of
+its Pi integration contract.
+
+State query:
+
+- `get_state` returns the current session state, including model info, streaming status, session
+  file, and context usage.
+- The implementation MAY use this to populate orchestrator runtime snapshots.
+
+Model management:
+
+- `set_model` switches the active model.
+- `cycle_model` cycles to the next available model.
+- `get_available_models` lists configured models.
+
+Thinking level:
+
+- `set_thinking_level` sets the reasoning level for supported models.
+- `cycle_thinking_level` cycles through available levels.
+
+Session name:
+
+- `set_session_name` sets a display name for the session.
+- The implementation MAY pass `--name <issue_identifier>` at process startup instead.
+
+#### 10.2.4 Turn Processing and Continuation
+
+The client sends prompts and processes Pi events until the active operation terminates.
+
+Completion conditions:
+
+- Pi `agent_end` event with a terminal assistant message -> success
+- Pi `message_update` event with `assistantMessageEvent.type == "error"` -> failure
+- Turn timeout (`pi.turn_timeout_ms`) -> failure
+- Tool execution result marked `isError: true` for a terminal operation -> failure
+- Subprocess exit -> failure
+
+Continuation processing:
+
+- If the worker decides to continue after a successful turn, it SHOULD issue another `prompt` or
+  `steer` command on the same live Pi process.
+- The Pi subprocess SHOULD remain alive across those continuation turns and be stopped only when
+  the worker run is ending.
+- The implementation MUST avoid resending the original issue prompt on continuation turns when the
+  Pi session already retains conversation history.
+
+Transport handling requirements:
+
+- Follow Pi RPC framing rules strictly (LF-delimited JSONL).
+- Keep the protocol stdin stream separate from stdout event stream.
+- Do not treat stdout events as command responses.
+
+#### 10.2.5 Emitted Runtime Events (Upstream to Orchestrator)
+
+The Pi RPC client emits structured events to the orchestrator callback. Each event SHOULD include:
+
+- `event` (enum/string)
+- `timestamp` (UTC timestamp)
+- `pi_pid` (if available)
+- OPTIONAL `usage` map (token counts)
+- payload fields as needed
+
+Important emitted events include, for example:
+
+- `agent_start`
+- `agent_end`
+- `turn_start`
+- `turn_end`
+- `message_start`
+- `message_update`
+- `message_end`
+- `tool_execution_start`
+- `tool_execution_update`
+- `tool_execution_end`
+- `queue_update`
+- `compaction_start`
+- `compaction_end`
+- `auto_retry_start`
+- `auto_retry_end`
+- `extension_error`
+- `malformed`
+
+#### 10.2.6 Tool Calls, Bash, and Extension UI
+
+Tool calls:
+
+- Tool execution is surfaced through `tool_execution_start`, `tool_execution_update`, and
+  `tool_execution_end` events.
+- Implementations MAY expose client-side tools to the Pi session when the Pi protocol supports
+  advertisement or registration.
+- If an unsupported tool is requested, the implementation MUST return a failure result through the
+  Pi protocol and continue the session.
+
+Bash execution:
+
+- Pi exposes a `bash` RPC command that executes shell commands and returns structured results.
+- The implementation SHOULD treat `bash` results as part of the agent's internal session flow and
+  MUST still enforce workspace safety invariants from Section 9.5.
+- Bash output MAY be truncated; if `truncated` is true and `fullOutputPath` is present, the
+  implementation MAY log or retain the full output for debugging.
+
+Extension UI protocol:
+
+- Pi extensions can request user interaction via dialog methods (`select`, `confirm`, `input`,
+  `editor`) and fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`,
+  `set_editor_text`) over the extension UI sub-protocol.
+- Dialog methods emit an `extension_ui_request` on stdout and block until the client sends an
+  `extension_ui_response` on stdin.
+- The implementation MUST respond to extension UI requests in a conforming way or document a
+  policy for resolving them automatically.
+- A run MUST NOT stall indefinitely waiting for extension UI responses.
+
+#### 10.2.7 Queue Modes, Compaction, and Retry
+
+Queue modes:
+
+- The implementation MAY set steering mode and follow-up mode using `set_steering_mode` and
+  `set_follow_up_mode`.
+- If implemented, the default behavior SHOULD preserve Pi's documented defaults unless the
+  workflow requires a different policy.
+
+Compaction:
+
+- The implementation MAY trigger manual compaction using the `compact` command.
+- Auto-compaction behavior is controlled by `set_auto_compaction`.
+- Compaction emits `compaction_start` and `compaction_end` events that SHOULD be forwarded to the
+  orchestrator for observability.
+
+Auto-retry:
+
+- Pi retries transient errors automatically when enabled via `set_auto_retry`.
+- Auto-retry emits `auto_retry_start` and `auto_retry_end` events.
+- The implementation SHOULD NOT interfere with Pi's internal auto-retry unless the orchestrator's
+  retry policy explicitly overrides it.
+
+#### 10.2.8 Timeouts and Error Mapping
+
+Timeouts:
+
+- `pi.read_timeout_ms`: request/response timeout during startup and synchronous commands
+- `pi.turn_timeout_ms`: total turn stream timeout for a single agent operation
+- `pi.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+
+Error mapping (RECOMMENDED normalized categories):
+
+- `pi_not_found`
+- `invalid_workspace_cwd`
+- `response_timeout`
+- `turn_timeout`
+- `subprocess_exit`
+- `response_error`
+- `turn_failed`
+- `turn_cancelled`
+- `extension_ui_timeout`
+- `agent_input_required`
+
+### 10.3 Approval, Tool Calls, and User Input Policy
 
 Approval, sandbox, and user-input behavior is implementation-defined.
 
@@ -1054,12 +1425,24 @@ Unsupported dynamic tool calls:
 
 Optional client-side tool extension:
 
-- An implementation MAY expose a limited set of client-side tools to the app-server session.
-- Current standardized optional tool: `linear_graphql`.
-- If implemented, supported tools SHOULD be advertised to the app-server session during startup
-  using the protocol mechanism supported by the targeted Codex app-server version.
+- An implementation MAY expose a limited set of client-side tools to the coding-agent session.
+- Standardized optional tools:
+  - `linear_graphql` — for `tracker.kind == "linear"` with any supported `agent_kind`.
+  - `beads_cli` — for `tracker.kind == "beads"` with any supported `agent_kind`.
+- If implemented, supported tools SHOULD be advertised using the mechanism supported by the targeted
+  coding-agent protocol during session startup.
 - Unsupported tool names SHOULD still return a failure result using the targeted protocol and
   continue the session.
+
+User-input-required policy:
+
+- Implementations MUST document how targeted-protocol user-input-required signals are handled.
+- A run MUST NOT stall indefinitely waiting for user input.
+- A conforming implementation MAY fail the run, surface the request to an operator, satisfy it
+  through an approved operator channel, or auto-resolve it according to its documented policy.
+- The example high-trust behavior above fails user-input-required turns immediately.
+- For `agent_kind == "pi"`, extension UI dialog requests (`extension_ui_request`) count as
+  user-input-required signals for this policy.
 
 `linear_graphql` extension contract:
 
@@ -1094,64 +1477,76 @@ Optional client-side tool extension:
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
 
-User-input-required policy:
-
-- Implementations MUST document how targeted-protocol user-input-required signals are handled.
-- A run MUST NOT stall indefinitely waiting for user input.
-- A conforming implementation MAY fail the run, surface the request to an operator, satisfy it
-  through an approved operator channel, or auto-resolve it according to its documented policy.
-- The example high-trust behavior above fails user-input-required turns immediately.
 
 ### 10.6 Timeouts and Error Mapping
 
 Timeouts:
 
-- `codex.read_timeout_ms`: request/response timeout during startup and sync requests
-- `codex.turn_timeout_ms`: total turn stream timeout
-- `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- For `agent_kind == "codex"`:
+  - `codex.read_timeout_ms`: request/response timeout during startup and sync requests
+  - `codex.turn_timeout_ms`: total turn stream timeout
+  - `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- For `agent_kind == "pi"`:
+  - `pi.read_timeout_ms`: request/response timeout during startup and synchronous commands
+  - `pi.turn_timeout_ms`: total turn stream timeout for a single agent operation
+  - `pi.stall_timeout_ms`: enforced by orchestrator based on event inactivity
 
 Error mapping (RECOMMENDED normalized categories):
 
-- `codex_not_found`
+- `codex_not_found` (Codex only)
+- `pi_not_found` (Pi only)
 - `invalid_workspace_cwd`
 - `response_timeout`
 - `turn_timeout`
-- `port_exit`
+- `subprocess_exit`
 - `response_error`
 - `turn_failed`
 - `turn_cancelled`
-- `turn_input_required`
+- `extension_ui_timeout` (Pi extension UI dialogs)
+- `agent_input_required`
 
 ### 10.7 Agent Runner Contract
 
-The `Agent Runner` wraps workspace + prompt + app-server client.
+The `Agent Runner` wraps workspace + prompt + agent client.
 
-Behavior:
+For `agent_kind == "codex"`:
 
 1. Create/reuse workspace for issue.
 2. Build prompt from workflow template.
-3. Start app-server session.
-4. Forward app-server events to orchestrator.
+3. Start Codex app-server session.
+4. Forward Codex app-server events to orchestrator.
+5. On any error, fail the worker attempt (the orchestrator will retry).
+
+For `agent_kind == "pi"`:
+
+1. Create/reuse workspace for issue.
+2. Build prompt from workflow template.
+3. Start Pi RPC session.
+4. Forward Pi RPC events to orchestrator.
 5. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
-## 11. Issue Tracker Integration Contract (Linear-Compatible)
+## 11. Issue Tracker Integration Contract (Linear-Compatible and Beads-Compatible)
 
 ### 11.1 REQUIRED Operations
 
 An implementation MUST support these tracker adapter operations:
 
 1. `fetch_candidate_issues()`
-   - Return issues in configured active states for a configured project.
+   - Return issues in configured active states for the configured tracker/project scope.
 
 2. `fetch_issues_by_states(state_names)`
    - Used for startup terminal cleanup.
 
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
+
+Implementations MAY expose tracker-specific extensions to these operations when the underlying
+tracker supports richer queries, but the three operations above define the minimum portable
+surface.
 
 ### 11.2 Query Semantics (Linear)
 
@@ -1175,10 +1570,60 @@ Important:
 - Linear GraphQL schema details can drift. Keep query construction isolated and test the exact query
   fields/types REQUIRED by this specification.
 
-A non-Linear implementation MAY change transport details, but the normalized outputs MUST match the
+### 11.3 Query Semantics (Beads)
+
+Beads-specific requirements for `tracker.kind == "beads"`:
+
+- `tracker.kind == "beads"`
+- Beads is a local-first, filesystem-backed tracker using the `bd` CLI tool (see
+  [https://github.com/gastownhall/beads](https://github.com/gastownhall/beads)).
+- The adapter interacts with Beads exclusively through the `bd` CLI subcommands. Direct
+  database/SQL access is NOT part of the portable adapter contract.
+- CLI invocation:
+  - Use `tracker.bd_command` (default `bd`) launched via `bash -lc`.
+  - Run in the repository working directory (the directory containing `WORKFLOW.md`) or the
+    Beads database directory if the implementation chooses to bind to `BEADS_DIR`.
+- Commands used by the adapter:
+  - Candidate fetch: `bd ready --json` or `bd list --status <active_states> --json`
+  - State refresh: `bd show <issue_id> --json` (one call per issue, or batch if `bd` supports it)
+  - Terminal-state fetch for startup cleanup: `bd list --status <terminal_states> --json`
+- Output processing:
+  - All commands MUST be invoked with `--json` when available.
+  - If the installed `bd` version does not support `--json`, the adapter MAY parse human-readable
+    output, but MUST document this as an implementation-defined behavior and the minimum required
+    `bd` version.
+  - JSON envelope handling: Beads supports `BD_JSON_ENVELOPE=1` to wrap output in
+    `{"schema_version": 1, "data": ...}`. Implementations SHOULD support both enveloped and
+    non-enveloped output.
+- Issue IDs:
+  - Beads uses hash-based IDs such as `bd-a1b2` (prefix-hash) and optionally hierarchical IDs
+    such as `bd-a3f8.1`, `bd-a3f8.1.1`.
+  - The adapter MUST treat the full hierarchical ID string as `issue.id` and as `issue.identifier`.
+- Dependencies/blockers:
+  - Beads models blockers via typed dependencies (e.g., `blocks`, `parent-child`, `waits-for`,
+    `conditional-blocks`).
+  - The adapter MUST treat only dependencies with blocking types as `blocked_by` entries.
+  - Non-blocking types (`related`, `tracks`, `discovered-from`, `caused-by`, `validates`,
+    `supersedes`, `replies_to`) MUST NOT populate `blocked_by`.
+- Priority mapping:
+  - Beads priority values are integers `0`–`4` where `0` is critical.
+  - The adapter MUST pass these through as `issue.priority` to match the Linear model where lower
+    numbers are higher priority.
+- State mapping:
+  - `open` and `in_progress` are active by default.
+  - `blocked` is active (the issue exists and may be worked on when unblocked).
+  - `deferred` is implementation-defined: implementations MAY treat it as active or terminal
+    depending on policy, but MUST document the choice.
+  - `closed` and `tombstone` are terminal.
+  - Custom states configured via `bd config set status.custom` MUST be mapped according to the
+    implementation's documented policy.
+- No pagination, network timeout, or HTTP transport concerns apply to Beads. Errors are service
+  execution errors from the CLI invocation.
+
+A non-Beads implementation MAY change transport details, but the normalized outputs MUST match the
 domain model in Section 4.
 
-### 11.3 Normalization Rules
+### 11.4 Normalization Rules
 
 Candidate issue normalization SHOULD produce fields listed in Section 4.1.1.
 
@@ -1191,18 +1636,39 @@ Additional normalization details:
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
 
-### 11.4 Error Handling Contract
+Beads-specific normalization:
+
+- `issue.id` and `issue.identifier` -> the Beads issue ID string (e.g. `bd-a1b2` or `bd-a3f8.1.1`)
+- `issue.title` -> `title`
+- `issue.description` -> `description`
+- `issue.state` -> `status` from Beads
+- `issue.labels` -> Beads `tags`, lowercased
+- `issue.priority` -> Beads `priority` integer mapped through
+- `issue.created_at` -> Beads `created_at` parsed as a timestamp
+- `issue.updated_at` -> Beads `updated_at` parsed as a timestamp
+- `issue.closed_at` -> Beads `closed_at` parsed as a timestamp; if present, the issue is terminal
+- `issue.blocked_by` -> derived from Beads `dependencies` where the dependency type is a blocking
+  type and the dependency target is still open or in progress; each entry uses the dependency
+  target's issue ID as `id` and identifier as `identifier`
+- `issue.url` -> null unless the implementation constructs one from repository metadata
+
+### 11.5 Error Handling Contract
 
 RECOMMENDED error categories:
 
 - `unsupported_tracker_kind`
-- `missing_tracker_api_key`
-- `missing_tracker_project_slug`
+- `missing_tracker_api_key` (Linear only)
+- `missing_tracker_project_slug` (Linear only)
+- `missing_bd_command` (Beads only)
 - `linear_api_request` (transport failures)
 - `linear_api_status` (non-200 HTTP)
 - `linear_graphql_errors`
 - `linear_unknown_payload`
 - `linear_missing_end_cursor` (pagination integrity error)
+- `beads_cli_not_found`
+- `beads_cli_exec_error`
+- `beads_cli_output_error`
+- `beads_json_parse_error`
 
 Orchestrator behavior on tracker errors:
 
@@ -1210,17 +1676,18 @@ Orchestrator behavior on tracker errors:
 - Running-state refresh failure: log and keep active workers running.
 - Startup terminal cleanup failure: log warning and continue startup.
 
-### 11.5 Tracker Writes (Important Boundary)
+### 11.6 Tracker Writes (Important Boundary)
 
-Symphony does not require first-class tracker write APIs in the orchestrator.
+Symphony does not require first-class tracker write APIs in the orchestrator for any tracker kind.
 
 - Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
   agent using tools defined by the workflow prompt.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
-- If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
-  toolchain rather than orchestrator business logic.
+- If a tracker-specific client-side tool extension is implemented (for example `linear_graphql` for
+  Linear, or a future `beads_cli` tool), it is still part of the agent toolchain rather than
+  orchestrator business logic.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -1295,7 +1762,7 @@ SHOULD return:
 - each running row SHOULD include `turn_count`
 - `retrying` (list of retry queue rows)
 - session and retry rows SHOULD include the tracker-provided issue URL when available
-- `codex_totals`
+- `agent_totals`
   - `input_tokens`
   - `output_tokens`
   - `total_tokens`
@@ -1320,10 +1787,15 @@ correctness.
 Token accounting rules:
 
 - Agent events can include token counts in multiple payload shapes.
-- Prefer absolute thread totals when available, such as:
-  - `thread/tokenUsage/updated` payloads
-  - `total_token_usage` within token-count wrapper events
-- Ignore delta-style payloads such as `last_token_usage` for dashboard/API totals.
+- For `agent_kind == "codex"`:
+  - Prefer absolute thread totals when available, such as:
+    - `thread/tokenUsage/updated` payloads
+    - `total_token_usage` within token-count wrapper events
+  - Ignore delta-style payloads such as `last_token_usage` for dashboard/API totals.
+- For `agent_kind == "pi"`:
+  - Prefer absolute totals from `get_session_stats` `tokens` fields when available.
+  - Use `AssistantMessage.usage` (input/output/cacheRead/cacheWrite/cost) and
+    `contextUsage` as supplementary signals.
 - Extract input/output/total token counts leniently from common field names within the selected
   payload.
 - For absolute totals, track deltas relative to last reported totals to avoid double-counting.
@@ -1439,7 +1911,7 @@ Minimum endpoints:
           "error": "no available orchestrator slots"
         }
       ],
-      "codex_totals": {
+      "agent_totals": {
         "input_tokens": 5000,
         "output_tokens": 2400,
         "total_tokens": 7400,
@@ -1706,8 +2178,8 @@ function start_service():
     claimed: set(),
     retry_attempts: {},
     completed: set(),
-    codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    codex_rate_limits: null
+    agent_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+    agent_rate_limits: null
   }
 
   validation = validate_dispatch_config()
@@ -1799,13 +2271,13 @@ function dispatch_issue(issue, state, attempt):
     identifier: issue.identifier,
     issue,
     session_id: null,
-    codex_app_server_pid: null,
-    last_codex_message: null,
-    last_codex_event: null,
-    last_codex_timestamp: null,
-    codex_input_tokens: 0,
-    codex_output_tokens: 0,
-    codex_total_tokens: 0,
+    agent_pid: null,
+    last_agent_message: null,
+    last_agent_event: null,
+    last_agent_timestamp: null,
+    agent_input_tokens: 0,
+    agent_output_tokens: 0,
+    agent_total_tokens: 0,
     last_reported_input_tokens: 0,
     last_reported_output_tokens: 0,
     last_reported_total_tokens: 0,
@@ -1941,7 +2413,7 @@ Validation profiles:
 - `Real Integration Profile`: environment-dependent smoke/integration checks RECOMMENDED before
   production use.
 
-Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bullets that begin with
+Unless otherwise noted, Sections 17.1 through 17.9 are `Core Conformance`. Bullets that begin with
 `If ... is implemented` are `Extension Conformance`.
 
 ### 17.1 Workflow and Config Parsing
@@ -1995,8 +2467,14 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
 - Dispatch sort order is priority then oldest creation time
-- `Todo` issue with non-terminal blockers is not eligible
-- `Todo` issue with terminal blockers is eligible
+- Blocker rules:
+  - For `tracker.kind == "linear"`:
+    - `Todo` issue with non-terminal blockers is not eligible
+    - `Todo` issue with terminal blockers is eligible
+  - For `tracker.kind == "beads"`:
+    - Dispatch eligibility for issues with blocking dependencies is implementation-defined.
+    - Implementations SHOULD use `bd ready` as the authoritative source for "has no open blockers"
+      when the CLI supports it.
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
@@ -2040,7 +2518,28 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   - invalid arguments, missing auth, and transport failures return structured failure payloads
   - unsupported tool names still fail without stalling the session
 
-### 17.6 Observability
+### 17.6 Pi Agent RPC Client
+
+If `agent_kind == "pi"` is implemented:
+
+- `pi` subprocess is launched with `bash -lc` in the workspace directory.
+- The implementation verifies the process speaks the Pi RPC JSONL protocol.
+- Pi RPC framing uses LF-delimited JSONL with no Unicode newline splitting.
+- Initial prompt is sent via the `prompt` RPC command with the rendered workflow prompt.
+- Workspace path is supplied to Pi through protocol-supported means or documented equivalently.
+- Continuation turns reuse the same live Pi process instead of spawning a new subprocess.
+- Events include `agent_start`, `agent_end`, `turn_start`, `turn_end`, `tool_execution_start`,
+  `tool_execution_update`, `tool_execution_end`, `message_update`, `compaction_start`,
+  `compaction_end`, `auto_retry_start`, `auto_retry_end`, and `extension_error`.
+- Timeouts map to `pi.read_timeout_ms`, `pi.turn_timeout_ms`, and `pi.stall_timeout_ms`.
+- Tool execution events and bash results are surfaced without breaking orchestrator contract.
+- Extension UI dialog requests are handled or auto-resolved per documented policy.
+- Token/runtime accounting uses Pi `get_session_stats` and message usage fields.
+- Session identifier is derived from Pi metadata or process lifetime and documented.
+- `beads_cli` or `linear_graphql` client-side tools, if implemented, use the Pi tool-call protocol
+  when `agent_kind == "pi"`.
+
+### 17.7 Observability
 
 - Validation failures are operator-visible
 - Structured logging includes issue/session context fields
@@ -2051,7 +2550,23 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - If humanized event summaries are implemented, they cover key wrapper/agent event classes without
   changing orchestrator behavior
 
-### 17.7 CLI and Host Lifecycle
+### 17.8 Beads Tracker Adapter (Extension Conformance)
+
+If `tracker.kind == "beads"` is implemented:
+
+- `bd` CLI invocation uses `tracker.bd_command` with `bash -lc` in the expected working directory.
+- Candidate fetch returns issues matching `tracker.active_states`.
+- Terminal-state issue fetch returns issues matching `tracker.terminal_states` for startup cleanup.
+- Issue-state refresh by ID returns minimal normalized issues.
+- Blocking dependencies from Beads are mapped to `blocked_by` with non-blocking types ignored.
+- Beads priority integers pass through as `issue.priority`.
+- Beads `status` maps to `issue.state`.
+- Labels/tags are lowercased.
+- Errors from CLI execution, missing binary, or malformed JSON produce the recommended error
+  categories in Section 11.5.
+- `deferred` state behavior is documented if treated as active or terminal.
+
+### 17.9 CLI and Host Lifecycle
 
 - CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
 - CLI uses `./WORKFLOW.md` when no workflow path argument is provided
@@ -2060,7 +2575,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
 
-### 17.8 Real Integration Profile (RECOMMENDED)
+### 17.10 Real Integration Profile (RECOMMENDED)
 
 These checks are RECOMMENDED for production readiness and MAY be skipped in CI when credentials,
 network access, or external service permissions are unavailable.
@@ -2088,12 +2603,15 @@ Use the same validation profiles as Section 17:
 - Typed config layer with defaults and `$` resolution
 - Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
-- Issue tracker client with candidate fetch + state refresh + terminal fetch
+- Issue tracker client with candidate fetch + state refresh + terminal fetch, supporting at least
+  one of `linear` or `beads`.
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
-- Coding-agent app-server subprocess client with JSON line protocol
-- Codex launch command config (`codex.command`, default `codex app-server`)
+- Coding-agent runtime client supports at least one of:
+  - Codex app-server with JSON line protocol (`codex.command`)
+  - Pi RPC mode with JSONL over stdio (`pi.command`)
+- Agent config supports `agent_kind` selection with defaults and validation
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
@@ -2107,20 +2625,21 @@ Use the same validation profiles as Section 17:
 - HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
-  app-server session using configured Symphony auth.
+  app-server or RPC session using configured Symphony auth.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
   of only via agent tools.
-- TODO: Add pluggable issue tracker adapters beyond Linear.
+- TODO: Add pluggable issue tracker adapters beyond Linear and Beads.
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)
 
-- Run the `Real Integration Profile` from Section 17.8 with valid credentials and network access.
+- Run the `Real Integration Profile` from Section 17.10 with valid credentials and network access.
 - Verify hook execution and workflow path resolution on the target host OS/shell environment.
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
+- For `agent_kind == "pi"`, verify Pi RPC startup, prompt delivery, and event streaming.
 
 ## Appendix A. SSH Worker Extension (OPTIONAL)
 
