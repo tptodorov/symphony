@@ -167,9 +167,11 @@ Fields:
   - Current tracker state name.
 - `branch_name` (string or null)
   - Tracker-provided branch metadata if available.
+- `assignee` (string or null)
+  - Tracker-provided assignee/owner/routing identity if available.
 - `url` (string or null)
 - `labels` (list of strings)
-  - Normalized to lowercase.
+  - Normalized to lowercase. For Beads, tags are normalized into this field.
 - `blocked_by` (list of blocker refs)
   - Each blocker ref contains:
     - `id` (string or null)
@@ -347,7 +349,7 @@ Note:
 - Extensions SHOULD document their field schema, defaults, validation rules, and whether changes
   apply dynamically or require restart.
 
-##### `agent_kind` (string)
+#### 5.3.1 `agent_kind` (string)
 
 - Default: `codex`.
 - Selects which coding-agent integration the runtime uses for this workflow.
@@ -360,7 +362,7 @@ Note:
 - When `agent_kind` is absent, implementations MUST default to `codex` for backward compatibility
   with existing `WORKFLOW.md` files.
 
-#### 5.3.1 `tracker` (object)
+#### 5.3.2 `tracker` (object)
 
 Fields:
 
@@ -378,12 +380,18 @@ Fields:
 - `project_slug` (string)
   - REQUIRED for dispatch when `tracker.kind == "linear"`.
   - NOT used for `tracker.kind == "beads"`.
+- `assignee` (string)
+  - OPTIONAL.
+  - If configured, an issue MUST be routed to this assignee/owner to dispatch or continue.
+  - Matching ignores case and surrounding whitespace.
+  - If a tracker adapter cannot return assignee/owner metadata, configuring this field MUST fail
+    dispatch preflight validation for that tracker kind.
 - `required_labels` (list of strings)
   - Default: `[]`.
-  - For `tracker.kind == "linear"`: an issue MUST contain every configured label to dispatch or
-    continue. Matching ignores case and surrounding whitespace. A blank configured label matches
-    no issue.
-  - NOT used for `tracker.kind == "beads"`.
+  - An issue MUST contain every configured label/tag to dispatch or continue. Matching ignores case
+    and surrounding whitespace. A blank configured label matches no issue.
+  - For `tracker.kind == "linear"`, labels are Linear labels.
+  - For `tracker.kind == "beads"`, labels are Beads tags normalized into `issue.labels`.
 - `active_states` (list of strings)
   - Default: `Todo`, `In Progress` for `linear`; `open`, `in_progress` for `beads`.
   - Implementations SHOULD provide tracker-kind-specific defaults that match the tracker's native
@@ -400,7 +408,7 @@ Fields:
   - The runtime launches this command via `bash -lc` in the workspace directory or bead database
     directory.
 
-#### 5.3.2 `polling` (object)
+#### 5.3.3 `polling` (object)
 
 Fields:
 
@@ -408,7 +416,7 @@ Fields:
   - Default: `30000`
   - Changes SHOULD be re-applied at runtime and affect future tick scheduling without restart.
 
-#### 5.3.3 `workspace` (object)
+#### 5.3.4 `workspace` (object)
 
 Fields:
 
@@ -418,7 +426,7 @@ Fields:
   - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
   - The effective workspace root is normalized to an absolute path before use.
 
-#### 5.3.4 `hooks` (object)
+#### 5.3.5 `hooks` (object)
 
 Fields:
 
@@ -442,7 +450,7 @@ Fields:
   - Invalid values fail configuration validation.
   - Changes SHOULD be re-applied at runtime for future hook executions.
 
-#### 5.3.5 `agent` (object)
+#### 5.3.6 `agent` (object)
 
 Fields:
 
@@ -655,6 +663,8 @@ Validation checks:
   (`tracker.kind == "linear"` requires it).
 - `tracker.bd_command` is present and non-empty when `tracker.kind == "beads"`.
 - `bd` CLI is reachable when `tracker.kind == "beads"` (for example `tracker.bd_command --version`).
+- If `tracker.assignee` is configured, the selected tracker adapter can return comparable
+  assignee/owner metadata.
 - `codex.command` is present and non-empty when `agent_kind == "codex"`.
 - `pi.command` is present and non-empty when `agent_kind == "pi"`.
 - Pi CLI is reachable when `agent_kind == "pi"` (for example `pi.command --version` or `pi.command --help`).
@@ -675,7 +685,8 @@ not require recognizing or validating extension fields unless that extension is 
   - `tracker.endpoint`, `tracker.api_key`, and `tracker.project_slug` are NOT used and SHOULD be
     ignored if present
 - Common tracker fields:
-  - `tracker.required_labels`: list of strings, default `[]` (Linear only; ignored for Beads)
+  - `tracker.assignee`: optional string; when set, candidates must match tracker assignee/owner
+  - `tracker.required_labels`: list of strings, default `[]` (Linear labels or Beads tags)
   - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]` for Linear,
     `["open", "in_progress"]` for Beads
   - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled",
@@ -802,6 +813,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
 
 - The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
 - `claimed` and `running` checks are REQUIRED before launching any worker.
+- The orchestrator MUST add the issue to `claimed` before spawning the worker; if worker spawn fails,
+  it MUST remove that claim before scheduling the retry.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
@@ -833,11 +846,10 @@ An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
 - Its state is in `active_states` and not in `terminal_states`.
-- It is routed to this worker by the configured assignee and contains every
-  label in `tracker.required_labels`.
-  - This rule applies only when `tracker.kind == "linear"` and `required_labels` is non-empty.
-  - For `tracker.kind == "beads"`, routing is implementation-defined (for example by assignee,
-    issue metadata, or CLI scoping) and MUST be documented.
+- If `tracker.assignee` is configured, it is routed to that assignee/owner.
+- It contains every label/tag in `tracker.required_labels` when non-empty.
+  - For `tracker.kind == "linear"`, labels are Linear labels.
+  - For `tracker.kind == "beads"`, labels are Beads tags.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -907,8 +919,8 @@ Part A: Stall detection
   a retry.
 - For `agent_kind == "pi"`: if `elapsed_ms > pi.stall_timeout_ms`, terminate the worker and queue a
   retry.
-- The generic stall timeout field for the active agent kind is used; if the inactive agent kind's
-  timeout is `<= 0`, stall detection for that kind is disabled.
+- The stall timeout field for the active agent kind is used; if that timeout is `<= 0`, stall
+  detection for that kind is disabled.
 
 Part B: Tracker state refresh
 
@@ -1477,8 +1489,39 @@ User-input-required policy:
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
 
+`beads_cli` extension contract:
 
-### 10.6 Timeouts and Error Mapping
+- Purpose: execute one `bd` CLI operation using Symphony's configured Beads command and repository
+  context for the current session.
+- Availability: only meaningful when `tracker.kind == "beads"` and `tracker.bd_command` is valid.
+- Preferred input shape:
+
+  ```json
+  {
+    "args": ["show", "bd-a1b2", "--json"]
+  }
+  ```
+
+- `args` MUST be a non-empty array of strings and MUST NOT include the `bd` executable itself.
+- Execute exactly one `bd` invocation per tool call.
+- The runtime MUST invoke the configured `tracker.bd_command` plus `args` in the same working
+  directory used by the Beads tracker adapter.
+- Implementations SHOULD execute arguments without shell interpolation. If `tracker.bd_command` is a
+  shell command string, only that configured command may be evaluated by the shell; tool-provided
+  `args` MUST be passed or quoted so they cannot add extra shell commands.
+- Implementations MAY additionally accept a raw argument string as shorthand, but MUST parse/quote it
+  safely and MUST reject command separators, redirects, pipes, and environment assignments.
+- For read operations, implementations SHOULD add or preserve `--json` when the installed `bd`
+  supports it.
+- Tool result semantics:
+  - process exit `0` with parseable output -> `success=true`
+  - process exit nonzero -> `success=false`, preserving stdout/stderr for debugging
+  - invalid input, missing `bd`, timeout, or malformed JSON when JSON was requested ->
+    `success=false` with an error payload
+- Return stdout/stderr, parsed JSON when available, exit status, and truncation metadata as
+  structured tool output that the model can inspect in-session.
+
+### 10.4 Timeouts and Error Mapping
 
 Timeouts:
 
@@ -1505,7 +1548,7 @@ Error mapping (RECOMMENDED normalized categories):
 - `extension_ui_timeout` (Pi extension UI dialogs)
 - `agent_input_required`
 
-### 10.7 Agent Runner Contract
+### 10.5 Agent Runner Contract
 
 The `Agent Runner` wraps workspace + prompt + agent client.
 
@@ -1584,7 +1627,8 @@ Beads-specific requirements for `tracker.kind == "beads"`:
   - Run in the repository working directory (the directory containing `WORKFLOW.md`) or the
     Beads database directory if the implementation chooses to bind to `BEADS_DIR`.
 - Commands used by the adapter:
-  - Candidate fetch: `bd ready --json` or `bd list --status <active_states> --json`
+  - Candidate fetch: `bd ready --json` when available; otherwise
+    `bd list --status <active_states> --json` plus dependency filtering in the adapter.
   - State refresh: `bd show <issue_id> --json` (one call per issue, or batch if `bd` supports it)
   - Terminal-state fetch for startup cleanup: `bd list --status <terminal_states> --json`
 - Output processing:
@@ -1599,24 +1643,33 @@ Beads-specific requirements for `tracker.kind == "beads"`:
   - Beads uses hash-based IDs such as `bd-a1b2` (prefix-hash) and optionally hierarchical IDs
     such as `bd-a3f8.1`, `bd-a3f8.1.1`.
   - The adapter MUST treat the full hierarchical ID string as `issue.id` and as `issue.identifier`.
+- Labels/tags:
+  - Beads `tags` MUST normalize to `issue.labels`.
+  - `tracker.required_labels` filters Beads tags with the same semantics as Linear labels.
+- Assignee/owner:
+  - If Beads output includes assignee, owner, or equivalent routing metadata, normalize it to
+    `issue.assignee`.
+  - If no comparable metadata exists, normalize `issue.assignee` to null; configuring
+    `tracker.assignee` is then a validation error for Beads.
 - Dependencies/blockers:
   - Beads models blockers via typed dependencies (e.g., `blocks`, `parent-child`, `waits-for`,
     `conditional-blocks`).
   - The adapter MUST treat only dependencies with blocking types as `blocked_by` entries.
   - Non-blocking types (`related`, `tracks`, `discovered-from`, `caused-by`, `validates`,
     `supersedes`, `replies_to`) MUST NOT populate `blocked_by`.
+  - `bd ready` SHOULD be used as the authoritative candidate source for unblocked Beads work when
+    available; otherwise the adapter MUST filter out issues with non-terminal blocking dependencies.
 - Priority mapping:
   - Beads priority values are integers `0`–`4` where `0` is critical.
   - The adapter MUST pass these through as `issue.priority` to match the Linear model where lower
     numbers are higher priority.
 - State mapping:
   - `open` and `in_progress` are active by default.
-  - `blocked` is active (the issue exists and may be worked on when unblocked).
-  - `deferred` is implementation-defined: implementations MAY treat it as active or terminal
-    depending on policy, but MUST document the choice.
-  - `closed` and `tombstone` are terminal.
-  - Custom states configured via `bd config set status.custom` MUST be mapped according to the
-    implementation's documented policy.
+  - `blocked` and `deferred` are non-terminal but not dispatch-active by default unless included in
+    `tracker.active_states`.
+  - `closed` and `tombstone` are terminal by default.
+  - Custom states configured via `bd config set status.custom` are dispatch-active only when listed
+    in `tracker.active_states` and terminal only when listed in `tracker.terminal_states`.
 - No pagination, network timeout, or HTTP transport concerns apply to Beads. Errors are service
   execution errors from the CLI invocation.
 
@@ -1629,10 +1682,9 @@ Candidate issue normalization SHOULD produce fields listed in Section 4.1.1.
 
 Additional normalization details:
 
-- Label names are trimmed and lowercased.
-
-- `labels` -> lowercase strings
-- `blocked_by` -> derived from inverse relations where relation type is `blocks`
+- `labels` -> trimmed, lowercase strings
+- `assignee` -> trimmed string or null
+- `blocked_by` -> tracker-native blocking relations only; non-blocking relations are ignored
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
 
@@ -1642,6 +1694,7 @@ Beads-specific normalization:
 - `issue.title` -> `title`
 - `issue.description` -> `description`
 - `issue.state` -> `status` from Beads
+- `issue.assignee` -> Beads assignee/owner/routing metadata when available, otherwise null
 - `issue.labels` -> Beads `tags`, lowercased
 - `issue.priority` -> Beads `priority` integer mapped through
 - `issue.created_at` -> Beads `created_at` parsed as a timestamp
@@ -1686,8 +1739,8 @@ Symphony does not require first-class tracker write APIs in the orchestrator for
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
 - If a tracker-specific client-side tool extension is implemented (for example `linear_graphql` for
-  Linear, or a future `beads_cli` tool), it is still part of the agent toolchain rather than
-  orchestrator business logic.
+  Linear or `beads_cli` for Beads), it is still part of the agent toolchain rather than orchestrator
+  business logic.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -2255,11 +2308,14 @@ function reconcile_running_issues(state):
 
 ```text
 function dispatch_issue(issue, state, attempt):
+  state.claimed.add(issue.id)
+
   worker = spawn_worker(
     fn -> run_agent_attempt(issue, attempt, parent_orchestrator_pid) end
   )
 
   if worker spawn failed:
+    state.claimed.remove(issue.id)
     return schedule_retry(state, issue.id, next_attempt(attempt), {
       identifier: issue.identifier,
       error: "failed to spawn agent"
@@ -2285,7 +2341,6 @@ function dispatch_issue(issue, state, attempt):
     started_at: now_utc()
   }
 
-  state.claimed.add(issue.id)
   state.retry_attempts.remove(issue.id)
   return state
 ```
@@ -2428,7 +2483,7 @@ Unless otherwise noted, Sections 17.1 through 17.9 are `Core Conformance`. Bulle
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when OPTIONAL values are missing
-- `tracker.kind` validation enforces currently supported kind (`linear`)
+- `tracker.kind` validation enforces currently supported kinds (`linear`, `beads`)
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
@@ -2454,15 +2509,27 @@ Unless otherwise noted, Sections 17.1 through 17.9 are `Core Conformance`. Bulle
 
 ### 17.3 Issue Tracker Client
 
-- Candidate issue fetch uses active states and project slug
-- Linear query uses the specified project filter field (`slugId`)
-- Empty `fetch_issues_by_states([])` returns empty without API call
-- Pagination preserves order across multiple pages
-- Blockers are normalized from inverse relations of type `blocks`
-- Labels are normalized to lowercase
+- Candidate issue fetch uses configured active states and tracker scope
+- Empty `fetch_issues_by_states([])` returns empty without invoking the tracker
 - Issue state refresh by ID returns minimal normalized issues
-- Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
-- Error mapping for request errors, non-200, GraphQL errors, malformed payloads
+- Labels/tags are normalized to lowercase
+- Blocking relationships are normalized to `blocked_by`; non-blocking relationships are ignored
+- Assignee/owner metadata is normalized when the selected tracker exposes it
+- Error mapping covers transport/CLI execution failures and malformed payloads
+- For `tracker.kind == "linear"`:
+  - candidate fetch uses `tracker.project_slug`
+  - Linear query uses the specified project filter field (`slugId`)
+  - pagination preserves order across multiple pages
+  - issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
+  - request errors, non-200 responses, GraphQL errors, and malformed payloads map to Section 11.5
+    categories
+- For `tracker.kind == "beads"`:
+  - candidate fetch uses `bd ready --json` when available, otherwise status listing plus blocker
+    filtering
+  - tags normalize to labels and support `tracker.required_labels`
+  - blocking dependencies map to `blocked_by`
+  - CLI execution errors, missing binary, malformed JSON, and unsupported JSON output map to Section
+    11.5 categories
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
@@ -2472,7 +2539,7 @@ Unless otherwise noted, Sections 17.1 through 17.9 are `Core Conformance`. Bulle
     - `Todo` issue with non-terminal blockers is not eligible
     - `Todo` issue with terminal blockers is eligible
   - For `tracker.kind == "beads"`:
-    - Dispatch eligibility for issues with blocking dependencies is implementation-defined.
+    - Issues with non-terminal blocking dependencies are not eligible.
     - Implementations SHOULD use `bd ready` as the authoritative source for "has no open blockers"
       when the CLI supports it.
 - Active-state issue refresh updates running entry state
@@ -2550,7 +2617,7 @@ If `agent_kind == "pi"` is implemented:
 - If humanized event summaries are implemented, they cover key wrapper/agent event classes without
   changing orchestrator behavior
 
-### 17.8 Beads Tracker Adapter (Extension Conformance)
+### 17.8 Beads Tracker Adapter (Core Conformance for Beads Support)
 
 If `tracker.kind == "beads"` is implemented:
 
@@ -2564,7 +2631,8 @@ If `tracker.kind == "beads"` is implemented:
 - Labels/tags are lowercased.
 - Errors from CLI execution, missing binary, or malformed JSON produce the recommended error
   categories in Section 11.5.
-- `deferred` state behavior is documented if treated as active or terminal.
+- `deferred` is non-terminal and not dispatch-active by default unless configured in
+  `tracker.active_states`.
 
 ### 17.9 CLI and Host Lifecycle
 
@@ -2580,8 +2648,10 @@ If `tracker.kind == "beads"` is implemented:
 These checks are RECOMMENDED for production readiness and MAY be skipped in CI when credentials,
 network access, or external service permissions are unavailable.
 
-- A real tracker smoke test can be run with valid credentials supplied by `LINEAR_API_KEY` or a
+- A real Linear smoke test can be run with valid credentials supplied by `LINEAR_API_KEY` or a
   documented local bootstrap mechanism (for example `~/.linear_api_key`).
+- A real Beads smoke test can be run against an isolated local Beads database/repository using the
+  configured `tracker.bd_command`.
 - Real integration tests SHOULD use isolated test identifiers/workspaces and clean up tracker
   artifacts when practical.
 - A skipped real-integration test SHOULD be reported as skipped, not silently treated as passed.
@@ -2626,6 +2696,8 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server or RPC session using configured Symphony auth.
+- `beads_cli` client-side tool extension exposes controlled Beads CLI access through the app-server
+  or RPC session using configured Symphony tracker context.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
