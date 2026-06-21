@@ -67,11 +67,30 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 	o.mu.Lock()
 	cfg := o.cfg
 	o.mu.Unlock()
-	issues, err := o.tracker.FetchCandidates(ctx, cfg)
+	candidates, err := o.tracker.FetchCandidates(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("fetch candidates: %w", err)
 	}
-	issues = append(o.dueRetries(), issues...)
+	candidateMap := make(map[string]domain.Issue)
+	for _, issue := range candidates {
+		candidateMap[issue.ID] = issue
+	}
+	dueIDs := o.dueRetryIDs()
+	issues := make([]domain.Issue, 0, len(dueIDs)+len(candidates))
+	retrySet := make(map[string]bool)
+	for _, id := range dueIDs {
+		retrySet[id] = true
+		if issue, ok := candidateMap[id]; ok {
+			issues = append(issues, issue)
+		} else {
+			o.releaseClaim(id)
+		}
+	}
+	for _, issue := range candidates {
+		if !retrySet[issue.ID] {
+			issues = append(issues, issue)
+		}
+	}
 	domain.SortIssuesForDispatch(issues)
 	for _, issue := range issues {
 		if err := o.dispatch(ctx, issue); err != nil {
@@ -129,7 +148,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	go o.forwardEvents(ch)
 	go func() {
 		start := time.Now()
-		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), TurnTimeout: agentTurnTimeout(cfg)}, ch)
+		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg)}, ch)
 		close(ch)
 		if cfg.Hooks.AfterRun != "" {
 			_ = workspace.RunHook(context.Background(), cfg.Hooks.AfterRun, ws.Path, cfg.Hooks.Timeout)
@@ -151,6 +170,13 @@ func agentTurnTimeout(cfg config.Effective) time.Duration {
 		return cfg.Pi.TurnTimeout
 	}
 	return cfg.Codex.TurnTimeout
+}
+
+func agentPolicy(cfg config.Effective) any {
+	if cfg.AgentKind == "pi" {
+		return cfg.Pi.Policy
+	}
+	return cfg.Codex.Policy
 }
 
 func agentStallTimeout(cfg config.Effective) time.Duration {
@@ -188,16 +214,17 @@ func (o *Orchestrator) stateSlotLocked(state string, cfg config.Effective) bool 
 
 func (o *Orchestrator) releaseClaim(id string) { o.mu.Lock(); delete(o.claimed, id); o.mu.Unlock() }
 
-func (o *Orchestrator) dueRetries() []domain.Issue {
+func (o *Orchestrator) dueRetryIDs() []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	now := time.Now()
-	out := []domain.Issue{}
+	out := []string{}
 	for id, r := range o.retries {
 		if !r.at.After(now) {
-			out = append(out, r.issue)
+			out = append(out, id)
 			o.attempts[id] = r.attempt
 			delete(o.retries, id)
+			delete(o.completed, id)
 		}
 	}
 	return out
@@ -229,6 +256,7 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 	}
 	if res.Completed {
 		o.completed[issue.ID] = time.Now()
+		o.retries[issue.ID] = retryItem{issue: issue, attempt: 1, at: time.Now().Add(time.Second)}
 		return
 	}
 	o.attempts[issue.ID]++

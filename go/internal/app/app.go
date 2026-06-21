@@ -13,6 +13,7 @@ import (
 	"github.com/openai/symphony/go/internal/agent/pi"
 	"github.com/openai/symphony/go/internal/config"
 	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/observability"
 	"github.com/openai/symphony/go/internal/orchestrator"
 	"github.com/openai/symphony/go/internal/server"
 	"github.com/openai/symphony/go/internal/tracker"
@@ -102,10 +103,16 @@ func (a *App) watch(ctx context.Context) {
 		case <-w.Events:
 			wf, err := workflow.Load(a.Opt.WorkflowPath)
 			if err != nil {
+				if a.Opt.Logger != nil {
+					observability.ReloadError(a.Opt.Logger, err)
+				}
 				continue
 			}
 			cfg, err := config.Resolve(wf, a.Opt.WorkflowPath)
 			if err != nil || config.Validate(cfg) != nil {
+				if a.Opt.Logger != nil {
+					observability.ReloadError(a.Opt.Logger, err)
+				}
 				continue
 			}
 			a.Orch.UpdateConfig(cfg)

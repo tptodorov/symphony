@@ -404,9 +404,9 @@ Fields:
 - `bd_command` (string)
   - Shell command for the `bd` CLI.
   - Default: `bd`.
-  - Applies only when `tracker.kind == "beads"`.
-  - The runtime launches this command via `bash -lc` in the workspace directory or bead database
-    directory.
+   - Applies only when `tracker.kind == "beads"`.
+   - The runtime launches this command via `bash -lc` in the repository working directory (the
+     directory containing `WORKFLOW.md`).
 
 #### 5.3.3 `polling` (object)
 
@@ -609,11 +609,10 @@ explicitly references them.
 
 Value coercion semantics:
 
-- Path/command fields support:
-  - `~` home expansion
-  - `$VAR` expansion for env-backed path values
-  - Apply expansion only to values intended to be local filesystem paths; do not rewrite URIs or
-    arbitrary shell command strings.
+- All string config values support `$VAR` expansion when they explicitly reference environment
+  variables.
+- `~` home expansion applies to filesystem path values.
+- Do not apply expansion to values that do not contain `$VAR_NAME` references.
 - Relative `workspace.root` values resolve relative to the directory containing the selected
   `WORKFLOW.md`.
 

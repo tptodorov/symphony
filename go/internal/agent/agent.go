@@ -16,6 +16,7 @@ type RunRequest struct {
 	MaxTurns    int
 	Command     string
 	TurnTimeout time.Duration
+	Policy      any
 }
 
 type Event struct {

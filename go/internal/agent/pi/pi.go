@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +26,12 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	}
 	if command == "" {
 		command = "pi --mode rpc --no-session"
+	}
+	if req.Workspace != "" && !strings.Contains(command, "--cwd") {
+		command += " --cwd " + req.Workspace
+	}
+	if req.Workspace == "" {
+		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("workspace path is required")}
 	}
 	if req.TurnTimeout > 0 {
 		var cancel context.CancelFunc

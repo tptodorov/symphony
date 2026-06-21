@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"syscall"
@@ -27,6 +28,9 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	if command == "" {
 		command = "codex app-server"
 	}
+	if req.Workspace == "" {
+		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("workspace path is required")}
+	}
 	if req.TurnTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, req.TurnTimeout)
@@ -35,6 +39,11 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
 	cmd.Dir = req.Workspace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if req.Policy != nil {
+		if b, err := json.Marshal(req.Policy); err == nil {
+			cmd.Env = append(cmd.Environ(), "SYMPHONY_CODEX_POLICY="+string(b))
+		}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("open stdin: %w", err)}

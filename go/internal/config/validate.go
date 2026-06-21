@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os/exec"
+	"strings"
 )
 
 func Validate(cfg Effective) error {
@@ -21,6 +23,8 @@ func Validate(cfg Effective) error {
 		}
 		if cfg.TrackerBDCommand == "" {
 			errs = append(errs, errors.New("tracker.bd_command is required for beads"))
+		} else if !isCommandReachable(cfg.TrackerBDCommand) {
+			errs = append(errs, fmt.Errorf("tracker.bd_command %q is not reachable", cfg.TrackerBDCommand))
 		}
 	case "":
 		errs = append(errs, errors.New("tracker.kind is required"))
@@ -42,8 +46,12 @@ func Validate(cfg Effective) error {
 	if cfg.AgentKind == "codex" && cfg.Codex.Command == "" {
 		errs = append(errs, errors.New("codex.command is required"))
 	}
-	if cfg.AgentKind == "pi" && cfg.Pi.Command == "" {
-		errs = append(errs, errors.New("pi.command is required"))
+	if cfg.AgentKind == "pi" {
+		if cfg.Pi.Command == "" {
+			errs = append(errs, errors.New("pi.command is required"))
+		} else if !isCommandReachable(cfg.Pi.Command) {
+			errs = append(errs, fmt.Errorf("pi.command %q is not reachable", cfg.Pi.Command))
+		}
 	}
 	if cfg.AgentKind != "codex" && cfg.AgentKind != "pi" {
 		errs = append(errs, fmt.Errorf("unsupported agent_kind %q", cfg.AgentKind))
@@ -52,4 +60,13 @@ func Validate(cfg Effective) error {
 		errs = append(errs, errors.New("pi.session_sync must be none, export, or sync"))
 	}
 	return errors.Join(errs...)
+}
+
+func isCommandReachable(command string) bool {
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		return false
+	}
+	_, err := exec.LookPath(parts[0])
+	return err == nil
 }

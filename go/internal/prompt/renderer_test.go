@@ -25,4 +25,14 @@ func TestRender(t *testing.T) {
 	if err != nil || !strings.Contains(out, "A") {
 		t.Fatalf("%q %v", out, err)
 	}
+	if _, err := Render("{{ issue.title | upCase }}", domain.Issue{Title: "t"}, nil); err == nil {
+		t.Fatal("expected unknown filter")
+	}
+	if _, err := Render("{{ issue.title | unknown_filter }}", domain.Issue{Title: "t"}, nil); err == nil {
+		t.Fatal("expected unknown filter")
+	}
+	out, err = Render("{{ issue.title | upcase }}", domain.Issue{Title: "t"}, nil)
+	if err != nil || out != "T" {
+		t.Fatalf("%q %v", out, err)
+	}
 }
