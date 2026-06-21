@@ -8,13 +8,22 @@ import (
 )
 
 type running struct {
-	issue                domain.Issue
-	sessionID, workspace string
-	started, lastEvent   time.Time
-	cancel               context.CancelFunc
+	issue                   domain.Issue
+	sessionID, workspace    string
+	started, lastEvent      time.Time
+	status                  string
+	error                   *string
+	turnCount               int
+	lastReportedInputTokens int
+	lastReportedOutputTokens int
+	lastReportedTotalTokens int
+	cancel                  context.CancelFunc
 }
 type retryItem struct {
 	issue   domain.Issue
 	attempt int
 	at      time.Time
 }
+
+// cancelled tracks issues whose worker was terminated by reconciliation
+// so workerExit can distinguish cancellation from normal/completed exit.

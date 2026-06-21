@@ -21,7 +21,7 @@ func Render(template string, issue domain.Issue, attempt *int) (string, error) {
 		if issue.Description != nil {
 			desc = "\n\n" + *issue.Description
 		}
-		return fmt.Sprintf("Work on %s: %s%s", issue.Identifier, issue.Title, desc), nil
+		return fmt.Sprintf("You are working on an issue from the configured tracker.%s", desc), nil
 	}
 	if err := checkKnown(template, ctx); err != nil {
 		return "", err

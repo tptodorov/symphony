@@ -6,7 +6,7 @@ import (
 )
 
 func TestHelpers(t *testing.T) {
-	if got := SanitizeWorkspaceKey(" ABC/123 "); got != "ABC-123" {
+	if got := SanitizeWorkspaceKey(" ABC/123 "); got != "ABC_123" {
 		t.Fatal(got)
 	}
 	if got := NormalizeState(" In Progress "); got != "in progress" {

@@ -32,7 +32,7 @@ type BlockerRef struct {
 var workspaceUnsafe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 func SanitizeWorkspaceKey(identifier string) string {
-	s := strings.Trim(workspaceUnsafe.ReplaceAllString(identifier, "-"), ".-")
+	s := strings.Trim(workspaceUnsafe.ReplaceAllString(identifier, "_"), "._")
 	if s == "" {
 		return "issue"
 	}

@@ -20,12 +20,13 @@ type RunRequest struct {
 }
 
 type Event struct {
-	SessionID string
-	IssueID   string
-	Type      string
-	Message   string
-	Usage     domain.TokenUsage
-	At        time.Time
+	SessionID   string
+	IssueID     string
+	Type        string
+	Message     string
+	Usage       domain.TokenUsage
+	RateLimits  map[string]any
+	At          time.Time
 }
 
 type Result struct {

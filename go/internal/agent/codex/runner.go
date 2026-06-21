@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,40 @@ type Runner struct {
 }
 
 func New(command string) *Runner { return &Runner{Command: command} }
+
+func eventType(line string) string {
+	var msg map[string]any
+	if err := json.Unmarshal([]byte(line), &msg); err == nil {
+		if t, ok := msg["type"].(string); ok && t != "" {
+			return t
+		}
+		if e, ok := msg["event"].(string); ok && e != "" {
+			return e
+		}
+	}
+	if strings.Contains(line, "turn.completed") || strings.Contains(line, "task_complete") {
+		return "turn_completed"
+	}
+	if strings.Contains(line, "turn.failed") || strings.Contains(line, "turn_failed") {
+		return "turn_failed"
+	}
+	if strings.Contains(line, "turn.cancelled") || strings.Contains(line, "turn_cancelled") {
+		return "turn_cancelled"
+	}
+	if strings.Contains(line, "approval.auto_approved") || strings.Contains(line, "auto_approved") {
+		return "approval_auto_approved"
+	}
+	if strings.Contains(line, "unsupported_tool") || strings.Contains(line, "tool_call") {
+		return "unsupported_tool_call"
+	}
+	if strings.Contains(line, "input_required") || strings.Contains(line, "turn_input_required") {
+		return "turn_input_required"
+	}
+	if strings.Contains(line, "error") {
+		return "turn_ended_with_error"
+	}
+	return "other_message"
+}
 
 func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- agent.Event) agent.Result {
 	command := req.Command
@@ -76,7 +111,7 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 				completed = true
 			}
 			select {
-			case events <- agent.Event{SessionID: req.SessionID, IssueID: req.Issue.ID, Type: "codex", Message: line, Usage: u, At: time.Now()}:
+			case events <- agent.Event{SessionID: req.SessionID, IssueID: req.Issue.ID, Type: eventType(line), Message: line, Usage: u, At: time.Now()}:
 			case <-ctx.Done():
 				return
 			}

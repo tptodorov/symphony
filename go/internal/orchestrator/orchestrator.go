@@ -28,10 +28,11 @@ type Orchestrator struct {
 	retries    map[string]retryItem
 	events     []agent.Event
 	totals     domain.AgentTotals
+	rateLimits map[string]any
 }
 
 func New(cfg config.Effective, tr tracker.Tracker, runner agent.Runner, wm workspace.Manager) *Orchestrator {
-	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]bool{}, retries: map[string]retryItem{}}
+	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]bool{}, retries: map[string]retryItem{}, rateLimits: nil}
 }
 
 func (o *Orchestrator) UpdateConfig(cfg config.Effective) { o.mu.Lock(); o.cfg = cfg; o.mu.Unlock() }
@@ -137,10 +138,13 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 		o.releaseClaim(issue.ID)
 		return err
 	}
+	if cfg.AgentKind == "pi" {
+		p = fmt.Sprintf("%s: %s\n\n%s", issue.Identifier, issue.Title, p)
+	}
 	sessionID := fmt.Sprintf("%s-%d", domain.SanitizeWorkspaceKey(issue.Identifier), time.Now().UnixNano())
 	rctx, cancel := context.WithCancel(ctx)
 	o.mu.Lock()
-	o.running[issue.ID] = running{issue: issue, sessionID: sessionID, workspace: ws.Path, started: time.Now(), lastEvent: time.Now(), cancel: cancel}
+	o.running[issue.ID] = running{issue: issue, sessionID: sessionID, workspace: ws.Path, started: time.Now(), lastEvent: time.Now(), status: "running", cancel: cancel}
 	delete(o.claimed, issue.ID)
 	delete(o.cancelled, issue.ID)
 	o.mu.Unlock()
@@ -236,6 +240,17 @@ func (o *Orchestrator) forwardEvents(ch <-chan agent.Event) {
 		o.events = append(o.events, ev)
 		if r := o.running[ev.IssueID]; r.sessionID != "" {
 			r.lastEvent = time.Now()
+			if ev.Type == "turn_completed" || ev.Type == "turn_started" {
+				r.turnCount++
+			}
+			if ev.RateLimits != nil {
+				o.rateLimits = ev.RateLimits
+			}
+			if ev.Usage.TotalTokens != 0 {
+				r.lastReportedInputTokens = ev.Usage.InputTokens
+				r.lastReportedOutputTokens = ev.Usage.OutputTokens
+				r.lastReportedTotalTokens = ev.Usage.TotalTokens
+			}
 			o.running[ev.IssueID] = r
 		}
 		o.mu.Unlock()
@@ -245,7 +260,18 @@ func (o *Orchestrator) forwardEvents(ch <-chan agent.Event) {
 func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed time.Duration) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	r := o.running[issue.ID]
 	delete(o.running, issue.ID)
+	r.status = "succeeded"
+	r.error = nil
+	if !res.Completed {
+		r.status = "failed"
+	}
+	if res.Err != nil {
+		r.status = "failed"
+		errStr := res.Err.Error()
+		r.error = &errStr
+	}
 	o.totals.InputTokens += res.Usage.InputTokens
 	o.totals.OutputTokens += res.Usage.OutputTokens
 	o.totals.TotalTokens += res.Usage.TotalTokens
@@ -331,12 +357,39 @@ func (o *Orchestrator) cancelAll() {
 func (o *Orchestrator) Snapshot() Snapshot {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	s := Snapshot{GeneratedAt: time.Now(), Counts: map[string]int{"running": len(o.running), "retrying": len(o.retries), "completed": len(o.completed)}}
+	s := Snapshot{
+		GeneratedAt: time.Now(),
+		Counts:      map[string]int{"running": len(o.running), "retrying": len(o.retries), "completed": len(o.completed)},
+		AgentTotals: &o.totals,
+		RateLimits:  o.rateLimits,
+	}
 	for _, r := range o.running {
-		s.Running = append(s.Running, RunningSnapshot{IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, SessionID: r.sessionID, Workspace: r.workspace})
+		sn := RunningSnapshot{
+			IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, SessionID: r.sessionID,
+			Workspace: r.workspace, TurnCount: r.turnCount, Status: r.status,
+			LastEvent: r.lastEvent.Format(time.RFC3339), StartedAt: &r.started, LastEventAt: &r.lastEvent,
+		}
+		if r.issue.URL != nil {
+			url := *r.issue.URL
+			sn.IssueURL = &url
+		}
+		if r.error != nil {
+			sn.Error = *r.error
+		}
+		if r.lastReportedTotalTokens != 0 || r.lastReportedInputTokens != 0 || r.lastReportedOutputTokens != 0 {
+			sn.Tokens = &domain.TokenUsage{
+				InputTokens: r.lastReportedInputTokens, OutputTokens: r.lastReportedOutputTokens, TotalTokens: r.lastReportedTotalTokens,
+			}
+		}
+		s.Running = append(s.Running, sn)
 	}
 	for _, r := range o.retries {
-		s.RetryQueue = append(s.RetryQueue, RetrySnapshot{IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, Attempt: r.attempt, At: r.at})
+		err := ""
+		if r.issue.UpdatedAt != nil && !r.issue.UpdatedAt.IsZero() {
+			_ = r.issue.UpdatedAt
+		}
+		sn := RetrySnapshot{IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, Attempt: r.attempt, At: r.at, Error: err}
+		s.RetryQueue = append(s.RetryQueue, sn)
 	}
 	return s
 }

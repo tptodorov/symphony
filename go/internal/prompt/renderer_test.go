@@ -22,7 +22,7 @@ func TestRender(t *testing.T) {
 		t.Fatal("expected unknown variable")
 	}
 	out, err = Render("", domain.Issue{Identifier: "A", Title: "T"}, nil)
-	if err != nil || !strings.Contains(out, "A") {
+	if err != nil || !strings.Contains(out, "configured tracker") {
 		t.Fatalf("%q %v", out, err)
 	}
 	if _, err := Render("{{ issue.title | upCase }}", domain.Issue{Title: "t"}, nil); err == nil {

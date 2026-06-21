@@ -93,7 +93,7 @@ func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.Run
 			accepted = true
 		}
 		if typeName == "extension_ui_request" {
-			_ = respondExtensionUI(stdin, msg)
+			_ = respondExtensionUI(stdin, msg, req.Policy)
 		}
 		if typeName == "agent_end" {
 			completed = true
@@ -110,17 +110,35 @@ func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.Run
 	return completed, nil
 }
 
-func respondExtensionUI(w io.Writer, msg map[string]any) error {
+func respondExtensionUI(w io.Writer, msg map[string]any, policy any) error {
 	method, _ := msg["method"].(string)
 	id, _ := msg["id"].(string)
 	if id == "" {
 		return nil
+	}
+	if isStrictPolicy(policy) {
+		return writeJSON(w, map[string]any{"type": "extension_ui_response", "id": id, "cancelled": true, "error": "extension UI dialogs are disabled by approval_policy"})
 	}
 	switch method {
 	case "confirm", "select", "input", "editor":
 		return writeJSON(w, map[string]any{"type": "extension_ui_response", "id": id, "cancelled": true})
 	}
 	return nil
+}
+
+func isStrictPolicy(policy any) bool {
+	if policy == nil {
+		return false
+	}
+	if s, ok := policy.(string); ok {
+		return s == "strict"
+	}
+	if m, ok := policy.(map[string]any); ok {
+		if mode, ok := m["mode"].(string); ok {
+			return mode == "strict"
+		}
+	}
+	return false
 }
 
 func writeJSON(w io.Writer, v any) error {

@@ -22,13 +22,16 @@ type Tracker struct {
 func New() *Tracker { return &Tracker{Command: "bd"} }
 
 func (t *Tracker) FetchCandidates(ctx context.Context, cfg config.Effective) ([]domain.Issue, error) {
-	args := []string{"list", "--json"}
-	for _, s := range cfg.ActiveStates {
-		args = append(args, "--status", s)
-	}
-	issues, err := t.runList(ctx, cfg, args)
+	issues, err := t.runList(ctx, cfg, []string{"ready", "--json"})
 	if err != nil {
-		return nil, err
+		args := []string{"list", "--json"}
+		for _, s := range cfg.ActiveStates {
+			args = append(args, "--status", s)
+		}
+		issues, err = t.runList(ctx, cfg, args)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return filterLabels(issues, cfg.RequiredLabels), nil
 }
