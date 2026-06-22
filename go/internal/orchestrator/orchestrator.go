@@ -435,7 +435,13 @@ func (o *Orchestrator) Snapshot() Snapshot {
 		}
 		if r.agentTotalTokens != 0 || r.agentInputTokens != 0 || r.agentOutputTokens != 0 {
 			sn.Tokens = &domain.TokenUsage{
-				InputTokens: r.lastReportedInputTokens, OutputTokens: r.lastReportedOutputTokens, TotalTokens: r.lastReportedTotalTokens,
+				InputTokens: r.agentInputTokens, OutputTokens: r.agentOutputTokens, TotalTokens: r.agentTotalTokens,
+			}
+		}
+		if r := o.attempts[sn.IssueID]; r > 0 {
+			sn.Attempts = &AttemptsSnapshot{
+				RestartCount: r - 1,
+				CurrentRetryAttempt: r,
 			}
 		}
 		s.Running = append(s.Running, sn)
