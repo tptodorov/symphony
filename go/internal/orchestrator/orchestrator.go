@@ -155,7 +155,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	o.recordAttempt(issue.ID, issue.Identifier, attempt, ws.Path, now, "streaming_turn", nil)
 	go func() {
 		start := time.Now()
-		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL}, ch)
+		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL, TrackerBDCommand: cfg.TrackerBDCommand, TrackerEndpoint: cfg.TrackerEndpoint, TrackerAPIKey: cfg.TrackerAPIKey}, ch)
 		close(ch)
 		if cfg.Hooks.AfterRun != "" {
 			_ = workspace.RunHook(context.Background(), cfg.Hooks.AfterRun, ws.Path, cfg.Hooks.Timeout)
@@ -282,14 +282,20 @@ func (o *Orchestrator) forwardEvents(ch <-chan agent.Event) {
 			if ev.RateLimits != nil {
 				o.rateLimits = ev.RateLimits
 			}
-		if ev.Usage.TotalTokens != 0 && ev.Usage.TotalTokens >= r.lastReportedTotalTokens {
-			o.totals.TotalTokens += ev.Usage.TotalTokens - r.lastReportedTotalTokens
-			o.totals.InputTokens += ev.Usage.InputTokens - r.lastReportedInputTokens
-			o.totals.OutputTokens += ev.Usage.OutputTokens - r.lastReportedOutputTokens
-		}
-		r.lastReportedInputTokens = ev.Usage.InputTokens
-		r.lastReportedOutputTokens = ev.Usage.OutputTokens
-		r.lastReportedTotalTokens = ev.Usage.TotalTokens
+			if ev.Usage.TotalTokens != 0 && ev.Usage.TotalTokens >= r.lastReportedTotalTokens {
+				deltaIn := ev.Usage.InputTokens - r.lastReportedInputTokens
+				deltaOut := ev.Usage.OutputTokens - r.lastReportedOutputTokens
+				deltaTotal := ev.Usage.TotalTokens - r.lastReportedTotalTokens
+				r.agentInputTokens += deltaIn
+				r.agentOutputTokens += deltaOut
+				r.agentTotalTokens += deltaTotal
+				o.totals.TotalTokens += deltaTotal
+				o.totals.InputTokens += deltaIn
+				o.totals.OutputTokens += deltaOut
+			}
+			r.lastReportedInputTokens = ev.Usage.InputTokens
+			r.lastReportedOutputTokens = ev.Usage.OutputTokens
+			r.lastReportedTotalTokens = ev.Usage.TotalTokens
 			o.running[ev.IssueID] = r
 		}
 		o.mu.Unlock()
@@ -427,7 +433,7 @@ func (o *Orchestrator) Snapshot() Snapshot {
 		if r.error != nil {
 			sn.Error = *r.error
 		}
-		if r.lastReportedTotalTokens != 0 || r.lastReportedInputTokens != 0 || r.lastReportedOutputTokens != 0 {
+		if r.agentTotalTokens != 0 || r.agentInputTokens != 0 || r.agentOutputTokens != 0 {
 			sn.Tokens = &domain.TokenUsage{
 				InputTokens: r.lastReportedInputTokens, OutputTokens: r.lastReportedOutputTokens, TotalTokens: r.lastReportedTotalTokens,
 			}

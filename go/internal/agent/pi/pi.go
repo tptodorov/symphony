@@ -137,11 +137,11 @@ func handleToolRequest(w io.Writer, msg map[string]any, req agent.RunRequest) er
 	switch method {
 	case "beads_cli":
 		args := parseStringArray(msg["args"])
-		result = tools.ExecuteBeadsCLI(context.Background(), req.Workspace, "", args)
+		result = tools.ExecuteBeadsCLI(context.Background(), req.Workspace, req.TrackerBDCommand, args)
 	case "linear_graphql":
 		query, _ := msg["query"].(string)
 		vars, _ := msg["variables"].(map[string]any)
-		result = tools.ExecuteLinearGraphQL(context.Background(), "", "", query, vars)
+		result = tools.ExecuteLinearGraphQL(context.Background(), req.TrackerEndpoint, req.TrackerAPIKey, query, vars)
 	default:
 		result = tools.ToolResult{Success: false, Error: "unknown tool: " + method}
 	}

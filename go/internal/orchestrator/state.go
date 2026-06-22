@@ -10,10 +10,14 @@ import (
 type running struct {
 	issue                   domain.Issue
 	sessionID, workspace    string
+	threadID, turnID        string
 	started, lastEvent      time.Time
 	status                  string
 	error                   *string
 	turnCount               int
+	agentInputTokens        int
+	agentOutputTokens       int
+	agentTotalTokens        int
 	lastReportedInputTokens int
 	lastReportedOutputTokens int
 	lastReportedTotalTokens int

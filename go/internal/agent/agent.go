@@ -18,7 +18,10 @@ type RunRequest struct {
 	TurnTimeout time.Duration
 	Policy      any
 	EnableBeadsCLI      bool
-	EnableLinearGraphQL bool
+	EnableLinearGraphQL   bool
+	TrackerBDCommand      string
+	TrackerEndpoint       string
+	TrackerAPIKey       string
 }
 
 type Event struct {
