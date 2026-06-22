@@ -29,10 +29,11 @@ type Orchestrator struct {
 	events     []agent.Event
 	totals     domain.AgentTotals
 	rateLimits map[string]any
+	runHistory map[string][]domain.RunAttempt
 }
 
 func New(cfg config.Effective, tr tracker.Tracker, runner agent.Runner, wm workspace.Manager) *Orchestrator {
-	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]bool{}, retries: map[string]retryItem{}, rateLimits: nil}
+	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]bool{}, retries: map[string]retryItem{}, rateLimits: nil, runHistory: map[string][]domain.RunAttempt{}}
 }
 
 func (o *Orchestrator) UpdateConfig(cfg config.Effective) { o.mu.Lock(); o.cfg = cfg; o.mu.Unlock() }
@@ -150,12 +151,22 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	o.mu.Unlock()
 	ch := make(chan agent.Event, 32)
 	go o.forwardEvents(ch)
+	now := time.Now()
+	o.recordAttempt(issue.ID, issue.Identifier, attempt, ws.Path, now, "streaming_turn", nil)
 	go func() {
 		start := time.Now()
-		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg)}, ch)
+		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL}, ch)
 		close(ch)
 		if cfg.Hooks.AfterRun != "" {
 			_ = workspace.RunHook(context.Background(), cfg.Hooks.AfterRun, ws.Path, cfg.Hooks.Timeout)
+		}
+		if res.SessionID != "" && res.SessionID != sessionID {
+			o.mu.Lock()
+			if r, ok := o.running[issue.ID]; ok {
+				r.sessionID = res.SessionID
+				o.running[issue.ID] = r
+			}
+			o.mu.Unlock()
 		}
 		o.workerExit(issue, res, time.Since(start))
 	}()
@@ -216,7 +227,32 @@ func (o *Orchestrator) stateSlotLocked(state string, cfg config.Effective) bool 
 	return used < limit
 }
 
-func (o *Orchestrator) releaseClaim(id string) { o.mu.Lock(); delete(o.claimed, id); o.mu.Unlock() }
+func (o *Orchestrator) releaseClaim(id string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.claimed, id)
+}
+
+func (o *Orchestrator) recordAttempt(issueID, identifier string, attempt int, workspace string, startedAt time.Time, status string, err *string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	entry := domain.RunAttempt{IssueID: issueID, IssueIdentifier: identifier, Attempt: attempt, WorkspacePath: workspace, StartedAt: startedAt, Status: domain.RunAttemptStatus(status), Error: err}
+	o.runHistory[issueID] = append(o.runHistory[issueID], entry)
+}
+
+func (o *Orchestrator) updateAttemptLocked(issueID, identifier string, attempt int, status string, err *string) {
+	hist, ok := o.runHistory[issueID]
+	if !ok || attempt >= len(hist) {
+		return
+	}
+	entry := hist[len(hist)-1]
+	if entry.Attempt == attempt {
+		entry.Status = domain.RunAttemptStatus(status)
+		entry.Error = err
+		hist[len(hist)-1] = entry
+		o.runHistory[issueID] = hist
+	}
+}
 
 func (o *Orchestrator) dueRetryIDs() []string {
 	o.mu.Lock()
@@ -246,11 +282,14 @@ func (o *Orchestrator) forwardEvents(ch <-chan agent.Event) {
 			if ev.RateLimits != nil {
 				o.rateLimits = ev.RateLimits
 			}
-			if ev.Usage.TotalTokens != 0 {
-				r.lastReportedInputTokens = ev.Usage.InputTokens
-				r.lastReportedOutputTokens = ev.Usage.OutputTokens
-				r.lastReportedTotalTokens = ev.Usage.TotalTokens
-			}
+		if ev.Usage.TotalTokens != 0 && ev.Usage.TotalTokens >= r.lastReportedTotalTokens {
+			o.totals.TotalTokens += ev.Usage.TotalTokens - r.lastReportedTotalTokens
+			o.totals.InputTokens += ev.Usage.InputTokens - r.lastReportedInputTokens
+			o.totals.OutputTokens += ev.Usage.OutputTokens - r.lastReportedOutputTokens
+		}
+		r.lastReportedInputTokens = ev.Usage.InputTokens
+		r.lastReportedOutputTokens = ev.Usage.OutputTokens
+		r.lastReportedTotalTokens = ev.Usage.TotalTokens
 			o.running[ev.IssueID] = r
 		}
 		o.mu.Unlock()
@@ -272,12 +311,24 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 		errStr := res.Err.Error()
 		r.error = &errStr
 	}
-	o.totals.InputTokens += res.Usage.InputTokens
-	o.totals.OutputTokens += res.Usage.OutputTokens
-	o.totals.TotalTokens += res.Usage.TotalTokens
 	o.totals.SecondsRunning += elapsed.Seconds()
+	attempt := o.attempts[issue.ID]
+	finalStatus := r.status
 	if o.cancelled[issue.ID] {
 		delete(o.cancelled, issue.ID)
+		finalStatus = "canceled_by_reconciliation"
+	}
+	hist, ok := o.runHistory[issue.ID]
+	if ok && len(hist) > 0 {
+		entry := hist[len(hist)-1]
+		if entry.Attempt == attempt {
+			entry.Status = domain.RunAttemptStatus(finalStatus)
+			entry.Error = r.error
+			hist[len(hist)-1] = entry
+			o.runHistory[issue.ID] = hist
+		}
+	}
+	if o.cancelled[issue.ID] {
 		return
 	}
 	if res.Completed {

@@ -73,6 +73,8 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 			}
 		}
 	}
+	cfg.EnableBeadsCLI = cfg.TrackerKind == "beads"
+	cfg.EnableLinearGraphQL = cfg.TrackerKind == "linear"
 	resolveEnvStrings(&cfg)
 	root, err := resolvePath(cfg.WorkspaceRoot, filepath.Dir(workflowPath))
 	if err != nil {

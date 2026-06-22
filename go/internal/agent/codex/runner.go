@@ -79,6 +79,39 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 			cmd.Env = append(cmd.Environ(), "SYMPHONY_CODEX_POLICY="+string(b))
 		}
 	}
+	if req.EnableBeadsCLI || req.EnableLinearGraphQL {
+		tools := []map[string]any{}
+		if req.EnableBeadsCLI {
+			tools = append(tools, map[string]any{
+				"name": "beads_cli",
+				"description": "Execute bd CLI commands using the configured tracker.bd_command in the repository working directory.",
+				"input_schema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"args": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					},
+					"required": []string{"args"},
+				},
+			})
+		}
+		if req.EnableLinearGraphQL {
+			tools = append(tools, map[string]any{
+				"name": "linear_graphql",
+				"description": "Execute a raw GraphQL query or mutation against Linear using configured tracker auth.",
+				"input_schema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query":    map[string]any{"type": "string"},
+						"variables": map[string]any{"type": "object"},
+					},
+					"required": []string{"query"},
+				},
+			})
+		}
+		if b, err := json.Marshal(map[string]any{"tools": tools}); err == nil {
+			cmd.Env = append(cmd.Environ(), "SYMPHONY_TOOLS="+string(b))
+		}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("open stdin: %w", err)}
@@ -96,6 +129,8 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	_ = stdin.Close()
 	usage := ExtractUsage(nil)
 	completed := false
+	var threadID, turnID string
+	sessionID := req.SessionID
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
@@ -110,8 +145,18 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 			if IsTerminalEvent(line) {
 				completed = true
 			}
+			tid, turn := extractThreadTurnID(line)
+			if tid != "" {
+				threadID = tid
+			}
+			if turn != "" {
+				turnID = turn
+			}
+			if threadID != "" && turnID != "" {
+				sessionID = threadID + "-" + turnID
+			}
 			select {
-			case events <- agent.Event{SessionID: req.SessionID, IssueID: req.Issue.ID, Type: eventType(line), Message: line, Usage: u, At: time.Now()}:
+			case events <- agent.Event{SessionID: sessionID, IssueID: req.Issue.ID, Type: eventType(line), Message: line, Usage: u, RateLimits: ExtractRateLimits([]byte(line)), At: time.Now()}:
 			case <-ctx.Done():
 				return
 			}
@@ -120,10 +165,39 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	err = cmd.Wait()
 	<-scanDone
 	if ctx.Err() != nil {
-		return agent.Result{SessionID: req.SessionID, Usage: usage, Err: ctx.Err()}
+		return agent.Result{SessionID: sessionID, Usage: usage, Err: ctx.Err()}
 	}
 	if err != nil {
-		return agent.Result{SessionID: req.SessionID, Usage: usage, Err: fmt.Errorf("codex exited: %w: %s", err, stderr.String())}
+		return agent.Result{SessionID: sessionID, Usage: usage, Err: fmt.Errorf("codex exited: %w: %s", err, stderr.String())}
 	}
-	return agent.Result{SessionID: req.SessionID, Usage: usage, Completed: completed}
+	return agent.Result{SessionID: sessionID, Usage: usage, Completed: completed}
+}
+
+func extractThreadTurnID(line string) (string, string) {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		return "", ""
+	}
+	tid := strField(m, "thread_id", "threadId", "thread.id")
+	turn := strField(m, "turn_id", "turnId", "turn.id")
+	if tid == "" {
+		if inner, ok := m["identity"].(map[string]any); ok {
+			tid = strField(inner, "thread_id", "threadId", "id")
+		}
+	}
+	if turn == "" {
+		if inner, ok := m["identity"].(map[string]any); ok {
+			turn = strField(inner, "turn_id", "turnId", "id")
+		}
+	}
+	return tid, turn
+}
+
+func strField(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
 }

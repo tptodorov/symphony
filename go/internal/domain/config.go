@@ -23,6 +23,8 @@ type EffectiveConfig struct {
 	Pi                  PiConfig
 	PerStateConcurrency map[string]int
 	ServerPort          int
+	EnableBeadsCLI      bool
+	EnableLinearGraphQL bool
 }
 
 type HooksConfig struct {

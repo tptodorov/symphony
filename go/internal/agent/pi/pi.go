@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/openai/symphony/go/internal/agent"
+	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/tools"
 )
 
 type Runner struct{ Command string }
@@ -54,26 +57,34 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	if err := cmd.Start(); err != nil {
 		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("start pi: %w", err)}
 	}
+	sessionID := derivePISessionID(req.SessionID, cmd)
 	if err := writeJSON(stdin, map[string]any{"id": req.SessionID, "type": "prompt", "message": req.Prompt}); err != nil {
 		_ = cmd.Process.Kill()
-		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("send pi prompt: %w", err)}
+		return agent.Result{SessionID: sessionID, Err: fmt.Errorf("send pi prompt: %w", err)}
 	}
 
-	completed, err := r.read(stdout, events, req, stdin)
+	completed, err := r.read(stdout, events, req, stdin, sessionID)
 	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
-		return agent.Result{SessionID: req.SessionID, Err: ctx.Err()}
+		return agent.Result{SessionID: sessionID, Err: ctx.Err()}
 	}
 	if err != nil {
-		return agent.Result{SessionID: req.SessionID, Err: err}
+		return agent.Result{SessionID: sessionID, Err: err}
 	}
 	if waitErr != nil {
-		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("pi exited: %w: %s", waitErr, stderr.String())}
+		return agent.Result{SessionID: sessionID, Err: fmt.Errorf("pi exited: %w: %s", waitErr, stderr.String())}
 	}
-	return agent.Result{SessionID: req.SessionID, Completed: completed}
+	return agent.Result{SessionID: sessionID, Completed: completed}
 }
 
-func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.RunRequest, stdin io.WriteCloser) (bool, error) {
+func derivePISessionID(reqSessionID string, cmd *exec.Cmd) string {
+	if cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
+		return "pi-" + strconv.Itoa(cmd.Process.Pid)
+	}
+	return reqSessionID
+}
+
+func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.RunRequest, stdin io.WriteCloser, sessionID string) (bool, error) {
 	s := bufio.NewScanner(stdout)
 	s.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	completed := false
@@ -82,7 +93,7 @@ func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.Run
 		line := s.Text()
 		var msg map[string]any
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			events <- agent.Event{SessionID: req.SessionID, IssueID: req.Issue.ID, Type: "pi_output", Message: line, At: time.Now()}
+			events <- agent.Event{SessionID: sessionID, IssueID: req.Issue.ID, Type: "pi_output", Message: line, At: time.Now()}
 			continue
 		}
 		typeName, _ := msg["type"].(string)
@@ -95,11 +106,14 @@ func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.Run
 		if typeName == "extension_ui_request" {
 			_ = respondExtensionUI(stdin, msg, req.Policy)
 		}
+		if typeName == "tool_request" {
+			_ = handleToolRequest(stdin, msg, req)
+		}
 		if typeName == "agent_end" {
 			completed = true
 			_ = stdin.Close()
 		}
-		events <- agent.Event{SessionID: req.SessionID, IssueID: req.Issue.ID, Type: typeName, Message: line, At: time.Now()}
+		events <- agent.Event{SessionID: sessionID, IssueID: req.Issue.ID, Type: typeName, Message: line, Usage: extractPIUsage(msg), RateLimits: extractPIRateLimits(msg), At: time.Now()}
 	}
 	if err := s.Err(); err != nil {
 		return completed, fmt.Errorf("read pi output: %w", err)
@@ -108,6 +122,102 @@ func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.Run
 		return completed, fmt.Errorf("pi prompt was not accepted")
 	}
 	return completed, nil
+}
+
+func handleToolRequest(w io.Writer, msg map[string]any, req agent.RunRequest) error {
+	if req.Policy != nil && isStrictPolicy(req.Policy) {
+		return writeJSON(w, map[string]any{"type": "tool_result", "id": msg["id"], "success": false, "error": "tool calls disabled by policy"})
+	}
+	id, _ := msg["id"].(string)
+	method, _ := msg["method"].(string)
+	if id == "" || method == "" {
+		return nil
+	}
+	var result tools.ToolResult
+	switch method {
+	case "beads_cli":
+		args := parseStringArray(msg["args"])
+		result = tools.ExecuteBeadsCLI(context.Background(), req.Workspace, "", args)
+	case "linear_graphql":
+		query, _ := msg["query"].(string)
+		vars, _ := msg["variables"].(map[string]any)
+		result = tools.ExecuteLinearGraphQL(context.Background(), "", "", query, vars)
+	default:
+		result = tools.ToolResult{Success: false, Error: "unknown tool: " + method}
+	}
+	resp := map[string]any{"type": "tool_result", "id": id, "success": result.Success}
+	if !result.Success {
+		resp["error"] = result.Error
+	} else {
+		resp["result"] = result.ParsedJSON
+	}
+	return writeJSON(w, resp)
+}
+
+func parseStringArray(v any) []string {
+	var out []string
+	if a, ok := v.([]any); ok {
+		for _, s := range a {
+			if str, ok := s.(string); ok {
+				out = append(out, str)
+			}
+		}
+	}
+	return out
+}
+
+func asInt(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	case string:
+		if n, err := strconv.Atoi(x); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func extractPIUsage(msg map[string]any) domain.TokenUsage {
+	if usage, ok := msg["usage"].(map[string]any); ok {
+		return domain.TokenUsage{
+			InputTokens: asInt(usage["input_tokens"]),
+			OutputTokens: asInt(usage["output_tokens"]),
+			TotalTokens: asInt(usage["total_tokens"]),
+		}
+	}
+	if session, ok := msg["session"].(map[string]any); ok {
+		if usage, ok := session["usage"].(map[string]any); ok {
+			return domain.TokenUsage{
+				InputTokens: asInt(usage["input_tokens"]),
+				OutputTokens: asInt(usage["output_tokens"]),
+				TotalTokens: asInt(usage["total_tokens"]),
+			}
+		}
+	}
+	return domain.TokenUsage{}
+}
+
+func extractPIRateLimits(msg map[string]any) map[string]any {
+	if rl, ok := msg["rate_limits"].(map[string]any); ok {
+		return rl
+	}
+	if rl, ok := msg["rateLimit"].(map[string]any); ok {
+		return rl
+	}
+	if session, ok := msg["session"].(map[string]any); ok {
+		if rl, ok := session["rate_limits"].(map[string]any); ok {
+			return rl
+		}
+		if stats, ok := session["stats"].(map[string]any); ok {
+			if rl, ok := stats["rate_limits"].(map[string]any); ok {
+				return rl
+			}
+		}
+	}
+	return nil
 }
 
 func respondExtensionUI(w io.Writer, msg map[string]any, policy any) error {

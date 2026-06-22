@@ -14,6 +14,24 @@ func ExtractUsage(b []byte) domain.TokenUsage {
 	}
 	return domain.TokenUsage{InputTokens: asInt(m["input_tokens"]), OutputTokens: asInt(m["output_tokens"]), TotalTokens: asInt(m["total_tokens"])}
 }
+
+func ExtractRateLimits(b []byte) map[string]any {
+	var m map[string]any
+	_ = json.Unmarshal(b, &m)
+	if rl, ok := m["rate_limits"].(map[string]any); ok {
+		return rl
+	}
+	if rl, ok := m["rateLimit"].(map[string]any); ok {
+		return rl
+	}
+	if usage, ok := m["usage"].(map[string]any); ok {
+		if rl, ok := usage["rate_limit"].(map[string]any); ok {
+			return rl
+		}
+	}
+	return nil
+}
+
 func asInt(v any) int {
 	if f, ok := v.(float64); ok {
 		return int(f)
