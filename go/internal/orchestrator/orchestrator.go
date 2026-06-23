@@ -98,6 +98,7 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 		candidateMap[issue.ID] = issue
 	}
 	dueIDs := o.dueRetryIDs()
+	pendingRetryIDs := o.pendingRetryIDs()
 	issues := make([]domain.Issue, 0, len(dueIDs)+len(candidates))
 	retrySet := make(map[string]bool)
 	for _, id := range dueIDs {
@@ -109,7 +110,7 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 		}
 	}
 	for _, issue := range candidates {
-		if !retrySet[issue.ID] {
+		if !retrySet[issue.ID] && !pendingRetryIDs[issue.ID] {
 			issues = append(issues, issue)
 		}
 	}
@@ -133,37 +134,42 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	attempt := o.attempts[issue.ID]
 	o.mu.Unlock()
 
+	started := time.Now()
+	o.recordAttempt(issue.ID, issue.Identifier, attempt, "", started, string(domain.RunAttemptPreparingWorkspace), nil)
 	ws, created, err := o.workspaces.CreateForIssue(issue.Identifier)
 	if err != nil {
-		o.releaseClaim(issue.ID)
-		return err
+		o.failDispatchAttempt(issue, attempt, "", err)
+		return nil
 	}
+	o.updateAttempt(issue.ID, issue.Identifier, attempt, ws.Path, string(domain.RunAttemptPreparingWorkspace), nil)
 	if created && cfg.Hooks.AfterCreate != "" {
 		if err := workspace.RunHook(ctx, cfg.Hooks.AfterCreate, ws.Path, cfg.Hooks.Timeout); err != nil {
-			o.releaseClaim(issue.ID)
+			_ = o.workspaces.RemoveForIssue(context.Background(), issue.Identifier, "", cfg.Hooks.Timeout)
 			if o.log != nil {
 				observability.HookFailure(o.log, "after_create", err)
 			}
-			return err
+			o.failDispatchAttempt(issue, attempt, ws.Path, err)
+			return nil
 		}
 	}
 	if cfg.Hooks.BeforeRun != "" {
 		if err := workspace.RunHook(ctx, cfg.Hooks.BeforeRun, ws.Path, cfg.Hooks.Timeout); err != nil {
-			o.releaseClaim(issue.ID)
 			if o.log != nil {
 				observability.HookFailure(o.log, "before_run", err)
 			}
-			return err
+			o.failDispatchAttempt(issue, attempt, ws.Path, err)
+			return nil
 		}
 	}
+	o.updateAttempt(issue.ID, issue.Identifier, attempt, ws.Path, string(domain.RunAttemptBuildingPrompt), nil)
 	var attemptPtr *int
 	if attempt > 0 {
 		attemptPtr = &attempt
 	}
 	p, err := prompt.Render(cfg.PromptTemplate, issue, attemptPtr)
 	if err != nil {
-		o.releaseClaim(issue.ID)
-		return err
+		o.failDispatchAttempt(issue, attempt, ws.Path, err)
+		return nil
 	}
 	if cfg.AgentKind == "pi" {
 		p = fmt.Sprintf("%s: %s\n\n%s", issue.Identifier, issue.Title, p)
@@ -171,8 +177,8 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	sessionID := fmt.Sprintf("%s-%d", domain.SanitizeWorkspaceKey(issue.Identifier), time.Now().UnixNano())
 	rctx, cancel := context.WithCancel(ctx)
 	o.mu.Lock()
-	started := time.Now()
-	o.running[issue.ID] = running{issue: issue, sessionID: sessionID, workspace: ws.Path, started: started, lastEvent: started, status: "running", lastEventType: "session_started", cancel: cancel}
+	runStarted := time.Now()
+	o.running[issue.ID] = running{issue: issue, sessionID: sessionID, workspace: ws.Path, started: runStarted, lastEvent: runStarted, status: "running", lastEventType: "session_started", cancel: cancel}
 	delete(o.claimed, issue.ID)
 	delete(o.cancelled, issue.ID)
 	o.mu.Unlock()
@@ -182,8 +188,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	}
 	ch := make(chan agent.Event, 32)
 	go o.forwardEvents(ch)
-	now := time.Now()
-	o.recordAttempt(issue.ID, issue.Identifier, attempt, ws.Path, now, "streaming_turn", nil)
+	o.updateAttempt(issue.ID, issue.Identifier, attempt, ws.Path, string(domain.RunAttemptStreaming), nil)
 	go func() {
 		start := time.Now()
 		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL, TrackerBDCommand: cfg.TrackerBDCommand, TrackerEndpoint: cfg.TrackerEndpoint, TrackerAPIKey: cfg.TrackerAPIKey}, ch)
@@ -264,6 +269,21 @@ func (o *Orchestrator) releaseClaim(id string) {
 	delete(o.claimed, id)
 }
 
+func (o *Orchestrator) failDispatchAttempt(issue domain.Issue, attempt int, workspacePath string, err error) {
+	errStr := err.Error()
+	o.mu.Lock()
+	o.updateAttemptLocked(issue.ID, issue.Identifier, attempt, workspacePath, string(domain.RunAttemptFailed), &errStr)
+	delete(o.claimed, issue.ID)
+	o.attempts[issue.ID]++
+	nextAttempt := o.attempts[issue.ID]
+	delay := backoff(nextAttempt, o.cfg.Agent.MaxRetryBackoff)
+	o.retries[issue.ID] = retryItem{issue: issue, attempt: nextAttempt, at: time.Now().Add(delay), err: errStr}
+	o.mu.Unlock()
+	if o.log != nil {
+		observability.RetryScheduled(o.log, issue.ID, issue.Identifier, delay)
+	}
+}
+
 func (o *Orchestrator) recordAttempt(issueID, identifier string, attempt int, workspace string, startedAt time.Time, status string, err *string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -271,18 +291,37 @@ func (o *Orchestrator) recordAttempt(issueID, identifier string, attempt int, wo
 	o.runHistory[issueID] = append(o.runHistory[issueID], entry)
 }
 
-func (o *Orchestrator) updateAttemptLocked(issueID, identifier string, attempt int, status string, err *string) {
+func (o *Orchestrator) updateAttempt(issueID, identifier string, attempt int, workspace string, status string, err *string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.updateAttemptLocked(issueID, identifier, attempt, workspace, status, err)
+}
+
+func (o *Orchestrator) updateAttemptLocked(issueID, identifier string, attempt int, workspace string, status string, err *string) {
 	hist, ok := o.runHistory[issueID]
-	if !ok || attempt >= len(hist) {
+	if !ok || len(hist) == 0 {
 		return
 	}
 	entry := hist[len(hist)-1]
 	if entry.Attempt == attempt {
+		if workspace != "" {
+			entry.WorkspacePath = workspace
+		}
 		entry.Status = domain.RunAttemptStatus(status)
 		entry.Error = err
 		hist[len(hist)-1] = entry
 		o.runHistory[issueID] = hist
 	}
+}
+
+func (o *Orchestrator) pendingRetryIDs() map[string]bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := map[string]bool{}
+	for id := range o.retries {
+		out[id] = true
+	}
+	return out
 }
 
 func (o *Orchestrator) dueRetryIDs() []string {

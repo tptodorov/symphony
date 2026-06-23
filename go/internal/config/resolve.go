@@ -32,6 +32,9 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 	cfg.TrackerEmail = str(m, "tracker.email", cfg.TrackerEmail)
 	cfg.TrackerProjectKey = str(m, "tracker.project_key", cfg.TrackerProjectKey)
 	cfg.TrackerProjectSlug = str(m, "tracker.project_slug", cfg.TrackerProjectSlug)
+	if cfg.TrackerKind == "jira" && strings.TrimSpace(cfg.TrackerProjectKey) == "" {
+		cfg.TrackerProjectKey = cfg.TrackerProjectSlug
+	}
 	cfg.TrackerAssignee = str(m, "tracker.assignee", cfg.TrackerAssignee)
 	cfg.TrackerBDCommand = str(m, "tracker.bd_command", cfg.TrackerBDCommand)
 	cfg.TrackerJQL = str(m, "tracker.jql", cfg.TrackerJQL)
@@ -72,7 +75,15 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 		cfg.ServerPortSet = true
 	}
 	if p := mapAny(m, "codex.policy"); p != nil {
-		cfg.Codex.Policy = p
+		cfg.Codex.Policy = cloneMap(p)
+	}
+	if cfg.Codex.Policy == nil {
+		cfg.Codex.Policy = map[string]any{}
+	}
+	for _, key := range []string{"approval_policy", "thread_sandbox", "turn_sandbox_policy"} {
+		if v, ok := lookup(m, "codex."+key); ok {
+			cfg.Codex.Policy[key] = v
+		}
 	}
 	pc := mapAny(m, "agent.max_concurrent_agents_by_state")
 	if pc == nil {
@@ -170,6 +181,13 @@ func mapAny(m map[string]any, path string) map[string]any {
 		}
 	}
 	return nil
+}
+func cloneMap(m map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 func lookup(m map[string]any, path string) (any, bool) {
 	var cur any = m

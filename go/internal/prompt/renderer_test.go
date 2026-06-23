@@ -18,6 +18,10 @@ func TestRender(t *testing.T) {
 	if err != nil || strings.TrimSpace(out) != "bug" {
 		t.Fatalf("%q %v", out, err)
 	}
+	out, err = Render("{% if attempt %}retry {{ attempt }}{% else %}first{% endif %}", domain.Issue{}, nil)
+	if err != nil || strings.TrimSpace(out) != "first" {
+		t.Fatalf("%q %v", out, err)
+	}
 	if _, err := Render("{{ issue.nope }}", domain.Issue{}, nil); err == nil {
 		t.Fatal("expected unknown variable")
 	}

@@ -16,8 +16,8 @@ behavior.
 ## 1. Problem Statement
 
 Symphony is a long-running automation service that continuously reads work from an issue
-tracker (Linear or Beads in this specification version), creates an isolated workspace for each
-issue, and runs a coding agent session for that issue inside the workspace.
+tracker (Linear, Jira, or Beads in this specification version), creates an isolated workspace for
+each issue, and runs a coding agent session for that issue inside the workspace.
 
 The service solves four operational problems:
 
@@ -137,8 +137,8 @@ Symphony is easiest to port when kept in these layers:
 
 ### 3.3 External Dependencies
 
-- Issue tracker API or CLI (Linear GraphQL API for `tracker.kind == "linear"`; `bd` CLI for
-  `tracker.kind == "beads"`).
+- Issue tracker API or CLI (Linear GraphQL API for `tracker.kind == "linear"`; Jira Cloud REST API
+  for `tracker.kind == "jira"`; `bd` CLI for `tracker.kind == "beads"`).
 - Local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable that supports the targeted agent mode (`codex` app-server or `pi` RPC
@@ -372,17 +372,58 @@ Fields:
 
 - `kind` (string)
   - REQUIRED for dispatch.
-  - Current supported values: `linear`, `beads`.
+  - Current supported values: `linear`, `jira`, `beads`.
 - `endpoint` (string)
   - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`.
+  - REQUIRED for `tracker.kind == "jira"`; this is the Jira site base URL, for example
+    `https://example.atlassian.net`.
+  - MAY be a literal URL or `$VAR_NAME`; workflows MAY use any environment variable name, for
+    example `$JIRA_URL`.
   - NOT used for `tracker.kind == "beads"`.
 - `api_key` (string)
   - MAY be a literal token or `$VAR_NAME`.
   - Canonical environment variable for `tracker.kind == "linear"`: `LINEAR_API_KEY`.
+  - For `tracker.kind == "jira"`, implementations MAY accept this as a compatibility alias for
+    `tracker.api_token`, but `tracker.api_token` is the canonical Jira field.
   - NOT used for `tracker.kind == "beads"`.
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
+- `api_token` (string)
+  - Jira API token for `tracker.kind == "jira"`.
+  - MAY be a literal token or `$VAR_NAME`.
+  - Canonical environment variable for `tracker.kind == "jira"`: `JIRA_API_TOKEN`.
+  - REQUIRED for dispatch when `tracker.kind == "jira"`.
+  - NOT used for `tracker.kind == "linear"` or `tracker.kind == "beads"`.
+- `email` (string)
+  - Jira account email for `tracker.kind == "jira"`.
+  - MAY be a literal value or `$VAR_NAME`.
+  - Canonical environment variable for `tracker.kind == "jira"`: `JIRA_EMAIL`.
+  - Workflows MAY use any environment variable name, for example `$JIRA_USERNAME`.
+  - REQUIRED for dispatch when `tracker.kind == "jira"`.
+  - NOT used for `tracker.kind == "linear"` or `tracker.kind == "beads"`.
 - `project_slug` (string)
   - REQUIRED for dispatch when `tracker.kind == "linear"`.
+  - For `tracker.kind == "jira"`, implementations MUST accept this as a compatibility alias for
+    `tracker.project_key` when `tracker.project_key` is absent.
+  - NOT used for `tracker.kind == "beads"`.
+- `project_key` (string)
+  - Jira project key for `tracker.kind == "jira"` (example: `ABC`).
+  - REQUIRED for default Jira candidate queries and project-scoped terminal-state cleanup.
+  - `tracker.project_slug` MAY be used instead for workflow portability between Linear and Jira
+    configurations, but `tracker.project_key` is the canonical Jira field.
+  - If `tracker.jql` is configured, implementations MAY allow dispatch without `tracker.project_key`
+    or `tracker.project_slug`, but they MUST document how startup terminal cleanup is scoped in that
+    mode.
+  - NOT used for `tracker.kind == "linear"` or `tracker.kind == "beads"`.
+- `jql` (string)
+  - OPTIONAL custom Jira candidate query for `tracker.kind == "jira"`.
+  - When present, this query fully replaces the default Jira candidate query.
+  - It does not replace state-refresh or terminal-cleanup queries unless an implementation documents
+    an additional tracker-specific extension.
+  - NOT used for `tracker.kind == "linear"` or `tracker.kind == "beads"`.
+- `page_size` (integer)
+  - Page size for paginated HTTP tracker requests.
+  - Default: `50`.
+  - Applies to `tracker.kind == "linear"` and `tracker.kind == "jira"`.
   - NOT used for `tracker.kind == "beads"`.
 - `assignee` (string)
   - OPTIONAL.
@@ -395,22 +436,23 @@ Fields:
   - An issue MUST contain every configured label/tag to dispatch or continue. Matching ignores case
     and surrounding whitespace. A blank configured label matches no issue.
   - For `tracker.kind == "linear"`, labels are Linear labels.
+  - For `tracker.kind == "jira"`, labels are Jira labels.
   - For `tracker.kind == "beads"`, labels are Beads tags normalized into `issue.labels`.
 - `active_states` (list of strings)
-  - Default: `Todo`, `In Progress` for `linear`; `open`, `in_progress` for `beads`.
+  - Default: `Todo`, `In Progress` for `linear` and `jira`; `open`, `in_progress` for `beads`.
   - Implementations SHOULD provide tracker-kind-specific defaults that match the tracker's native
     state vocabulary.
 - `terminal_states` (list of strings)
-  - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done` for `linear`; `closed`,
-    `tombstone` for `beads`.
+  - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done` for `linear` and `jira`;
+    `closed`, `tombstone` for `beads`.
   - Implementations SHOULD provide tracker-kind-specific defaults that match the tracker's native
     state vocabulary.
 - `bd_command` (string)
   - Shell command for the `bd` CLI.
   - Default: `bd`.
-   - Applies only when `tracker.kind == "beads"`.
-   - The runtime launches this command via `bash -lc` in the repository working directory (the
-     directory containing `WORKFLOW.md`).
+  - Applies only when `tracker.kind == "beads"`.
+  - The runtime launches this command via `bash -lc` in the repository working directory (the
+    directory containing `WORKFLOW.md`).
 
 #### 5.3.3 `polling` (object)
 
@@ -663,8 +705,14 @@ Validation checks:
 - Workflow file can be loaded and parsed.
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution when `tracker.kind == "linear"`.
+- `tracker.endpoint`, `tracker.email`, and `tracker.api_token` are present after `$` resolution when
+  `tracker.kind == "jira"`.
 - `tracker.project_slug` is present when REQUIRED by the selected tracker kind
   (`tracker.kind == "linear"` requires it).
+- `tracker.project_key` or `tracker.project_slug` is present when REQUIRED by the selected tracker
+  kind (`tracker.kind == "jira"` requires one of them for default candidate queries and
+  project-scoped terminal cleanup; implementations that allow `tracker.jql` without either field
+  MUST document the terminal-cleanup scope).
 - `tracker.bd_command` is present and non-empty when `tracker.kind == "beads"`.
 - `bd` CLI is reachable when `tracker.kind == "beads"` (for example `tracker.bd_command --version`).
 - If `tracker.assignee` is configured, the selected tracker adapter can return comparable
@@ -679,22 +727,34 @@ This section is intentionally redundant so a coding agent can implement the conf
 Extension fields are documented in the extension section that defines them. Core conformance does
 not require recognizing or validating extension fields unless that extension is implemented.
 
-- `tracker.kind`: string, REQUIRED, currently `linear` or `beads`
+- `tracker.kind`: string, REQUIRED, currently `linear`, `jira`, or `beads`
 - For `tracker.kind=linear`:
   - `tracker.endpoint`: string, default `https://api.linear.app/graphql`
   - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY`
   - `tracker.project_slug`: string, REQUIRED
+- For `tracker.kind=jira`:
+  - `tracker.endpoint`: string or `$VAR`, REQUIRED, Jira site base URL
+  - `tracker.email`: string or `$VAR`, REQUIRED, canonical env `JIRA_EMAIL`
+  - `tracker.api_token`: string or `$VAR`, REQUIRED, canonical env `JIRA_API_TOKEN`
+  - `tracker.api_key`: optional compatibility alias for `tracker.api_token`
+  - `tracker.project_key`: string, canonical Jira project scope, REQUIRED for default candidate
+    queries and project-scoped terminal cleanup unless `tracker.project_slug` is provided
+  - `tracker.project_slug`: optional compatibility alias for `tracker.project_key` when
+    `tracker.project_key` is absent
+  - `tracker.jql`: optional string; when present, replaces the default candidate query
+  - `tracker.page_size`: integer, default `50`
 - For `tracker.kind=beads`:
   - `tracker.bd_command`: shell command string, default `bd`
   - `tracker.endpoint`, `tracker.api_key`, and `tracker.project_slug` are NOT used and SHOULD be
     ignored if present
 - Common tracker fields:
   - `tracker.assignee`: optional string; when set, candidates must match tracker assignee/owner
-  - `tracker.required_labels`: list of strings, default `[]` (Linear labels or Beads tags)
+  - `tracker.required_labels`: list of strings, default `[]` (Linear labels, Jira labels, or Beads
+    tags)
   - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]` for Linear,
-    `["open", "in_progress"]` for Beads
+    `["Todo", "In Progress"]` for Jira, `["open", "in_progress"]` for Beads
   - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled",
-    "Duplicate", "Done"]` for Linear, `["closed", "tombstone"]` for Beads
+    "Duplicate", "Done"]` for Linear and Jira, `["closed", "tombstone"]` for Beads
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1444,6 +1504,7 @@ Optional client-side tool extension:
 - An implementation MAY expose a limited set of client-side tools to the coding-agent session.
 - Standardized optional tools:
   - `linear_graphql` — for `tracker.kind == "linear"` with any supported `agent_kind`.
+  - `jira_rest` — for `tracker.kind == "jira"` with any supported `agent_kind`.
   - `beads_cli` — for `tracker.kind == "beads"` with any supported `agent_kind`.
 - If implemented, supported tools SHOULD be advertised using the mechanism supported by the targeted
   coding-agent protocol during session startup.
@@ -1492,6 +1553,42 @@ User-input-required policy:
   - invalid input, missing auth, or transport failure -> `success=false` with an error payload
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
+
+`jira_rest` extension contract:
+
+- Purpose: execute one Jira REST API request using Symphony's configured Jira endpoint and auth for
+  the current session.
+- Availability: only meaningful when `tracker.kind == "jira"` and valid Jira auth is configured.
+- Preferred input shape:
+
+  ```json
+  {
+    "method": "GET",
+    "path": "/rest/api/3/issue/ABC-123",
+    "query": {
+      "fields": "summary,status"
+    },
+    "body": {
+      "optional": "json request body"
+    }
+  }
+  ```
+
+- `method` MUST be one of `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`.
+- `path` MUST be a relative Jira REST path beginning with `/rest/api/`; absolute URLs and paths
+  containing a scheme or host MUST be rejected.
+- `query` is OPTIONAL and, when present, MUST be a JSON object whose values are strings, numbers,
+  booleans, nulls, or arrays of those scalar values.
+- `body` is OPTIONAL and, when present, MUST be JSON-serializable.
+- Execute one Jira REST request per tool call.
+- Reuse the configured Jira endpoint, email, and API token from the active Symphony
+  workflow/runtime config; do not require the coding agent to read raw tokens from disk.
+- Tool result semantics:
+  - HTTP 2xx -> `success=true`, preserving the parsed JSON response when available
+  - HTTP non-2xx -> `success=false`, preserving status and a bounded response body for debugging
+  - invalid input, missing auth, or transport failure -> `success=false` with an error payload
+- Return response status, headers needed for debugging/rate limits, parsed JSON or text body, and
+  truncation metadata as structured tool output that the model can inspect in-session.
 
 `beads_cli` extension contract:
 
@@ -1576,7 +1673,7 @@ Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
-## 11. Issue Tracker Integration Contract (Linear-Compatible and Beads-Compatible)
+## 11. Issue Tracker Integration Contract (Linear-Compatible, Jira-Compatible, and Beads-Compatible)
 
 ### 11.1 REQUIRED Operations
 
@@ -1617,7 +1714,45 @@ Important:
 - Linear GraphQL schema details can drift. Keep query construction isolated and test the exact query
   fields/types REQUIRED by this specification.
 
-### 11.3 Query Semantics (Beads)
+### 11.3 Query Semantics (Jira)
+
+Jira-specific requirements for `tracker.kind == "jira"`:
+
+- `tracker.kind == "jira"` selects the Jira tracker adapter.
+- `tracker.endpoint` is the Jira site base URL and the adapter uses Jira Cloud REST API paths under
+  that endpoint.
+- Authentication uses Jira Basic auth with `tracker.email` and `tracker.api_token`.
+- Candidate issue queries use `/rest/api/3/search/jql`.
+- If `tracker.jql` is configured, the adapter uses it as the complete candidate JQL query.
+- If `tracker.jql` is not configured, the default candidate JQL is:
+  `project = "<project_key_or_slug>" AND status in ("<active_state>", ...) ORDER BY priority ASC, created ASC`.
+- `tracker.project_key` scopes default candidate queries and terminal-state cleanup queries. If
+  `tracker.project_key` is absent, implementations MUST use `tracker.project_slug` as a Jira
+  project-key compatibility alias. Implementations that allow `tracker.jql` without either field
+  MUST document how terminal-state cleanup is scoped.
+- Candidate and issue-state refresh queries include issue labels. Required label filtering happens
+  after normalization so refresh can observe label removal and stop or release existing work.
+- Issue-state refresh uses stable Jira issue IDs (`id in (...)`) when normalized `issue.id` is the
+  Jira REST `id`. If an implementation normalizes Jira keys as `issue.id`, it MUST use key-based
+  refresh consistently and document that implementation-defined choice.
+- Terminal-state cleanup fetches issues in configured terminal states and uses `tracker.project_key`,
+  or `tracker.project_slug` when `tracker.project_key` is absent, for project scoping when present.
+- Pagination uses Jira `nextPageToken` / `isLast` semantics and preserves result order across pages.
+- Page size defaults to `50` and is configurable with `tracker.page_size`.
+- Network timeout default is `30000 ms`.
+- Jira search requests include at least these fields: `summary`, `description`, `priority`,
+  `status`, `assignee`, `labels`, `created`, `updated`, and `issuelinks`.
+- Blocking issue links are normalized to `issue.blocked_by`; non-blocking issue links are ignored.
+
+Important:
+
+- Custom `tracker.jql` controls which Jira issues are considered candidates. It does not change the
+  generic dispatch eligibility rules: required labels, assignee, active states, terminal states, and
+  blockers still apply after normalization.
+- Jira REST API details can drift. Keep query construction isolated and test exact request paths,
+  fields, pagination behavior, auth headers, and JQL strings REQUIRED by this specification.
+
+### 11.4 Query Semantics (Beads)
 
 Beads-specific requirements for `tracker.kind == "beads"`:
 
@@ -1677,10 +1812,10 @@ Beads-specific requirements for `tracker.kind == "beads"`:
 - No pagination, network timeout, or HTTP transport concerns apply to Beads. Errors are service
   execution errors from the CLI invocation.
 
-A non-Beads implementation MAY change transport details, but the normalized outputs MUST match the
+An implementation MAY vary tracker transport details, but the normalized outputs MUST match the
 domain model in Section 4.
 
-### 11.4 Normalization Rules
+### 11.5 Normalization Rules
 
 Candidate issue normalization SHOULD produce fields listed in Section 4.1.1.
 
@@ -1691,6 +1826,24 @@ Additional normalization details:
 - `blocked_by` -> tracker-native blocking relations only; non-blocking relations are ignored
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
+
+Jira-specific normalization:
+
+- `issue.id` -> Jira REST issue `id` (stable tracker-internal ID)
+- `issue.identifier` -> Jira issue key (example: `ABC-123`)
+- `issue.title` -> `fields.summary`
+- `issue.description` -> Jira ADF `fields.description` converted to plain text, or null when empty
+- `issue.state` -> `fields.status.name`
+- `issue.assignee` -> Jira assignee email when available, otherwise display name or account ID
+- `issue.labels` -> `fields.labels`, lowercased
+- `issue.priority` -> numeric `fields.priority.id` when parseable, otherwise null
+- `issue.created_at` -> `fields.created` parsed as a timestamp
+- `issue.updated_at` -> `fields.updated` parsed as a timestamp
+- `issue.blocked_by` -> derived from Jira `fields.issuelinks` where the link type is `Blocks` and
+  the link has an `inwardIssue`; each entry uses the linked issue's stable ID, key, and status when
+  present
+- `issue.url` -> Jira browse URL for the issue key when the implementation can construct one from
+  `tracker.endpoint`; otherwise null
 
 Beads-specific normalization:
 
@@ -1709,19 +1862,29 @@ Beads-specific normalization:
   target's issue ID as `id` and identifier as `identifier`
 - `issue.url` -> null unless the implementation constructs one from repository metadata
 
-### 11.5 Error Handling Contract
+### 11.6 Error Handling Contract
 
 RECOMMENDED error categories:
 
 - `unsupported_tracker_kind`
 - `missing_tracker_api_key` (Linear only)
 - `missing_tracker_project_slug` (Linear only)
+- `missing_jira_endpoint` (Jira only)
+- `missing_jira_email` (Jira only)
+- `missing_jira_api_token` (Jira only)
+- `missing_jira_project_scope` (Jira only, when neither `tracker.project_key` nor
+  `tracker.project_slug` is present and one is required for the selected query/cleanup mode)
 - `missing_bd_command` (Beads only)
 - `linear_api_request` (transport failures)
 - `linear_api_status` (non-200 HTTP)
 - `linear_graphql_errors`
 - `linear_unknown_payload`
 - `linear_missing_end_cursor` (pagination integrity error)
+- `jira_api_request` (transport failures)
+- `jira_api_status` (non-2xx HTTP)
+- `jira_unknown_payload`
+- `jira_jql_required`
+- `jira_missing_next_page_token` (pagination integrity error)
 - `beads_cli_not_found`
 - `beads_cli_exec_error`
 - `beads_cli_output_error`
@@ -1733,7 +1896,7 @@ Orchestrator behavior on tracker errors:
 - Running-state refresh failure: log and keep active workers running.
 - Startup terminal cleanup failure: log warning and continue startup.
 
-### 11.6 Tracker Writes (Important Boundary)
+### 11.7 Tracker Writes (Important Boundary)
 
 Symphony does not require first-class tracker write APIs in the orchestrator for any tracker kind.
 
@@ -1743,8 +1906,8 @@ Symphony does not require first-class tracker write APIs in the orchestrator for
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
 - If a tracker-specific client-side tool extension is implemented (for example `linear_graphql` for
-  Linear or `beads_cli` for Beads), it is still part of the agent toolchain rather than orchestrator
-  business logic.
+  Linear, `jira_rest` for Jira, or `beads_cli` for Beads), it is still part of the agent toolchain
+  rather than orchestrator business logic.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -2208,9 +2371,9 @@ Possible hardening measures include:
   of running with a maximally permissive configuration.
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
   separate credentials beyond the built-in Codex policy controls.
-- Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
-  dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
-- Narrowing the `linear_graphql` tool so it can only read or mutate data inside the
+- Filtering which tracker issues, projects, teams, labels, JQL scopes, or other tracker sources are
+  eligible for dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
+- Narrowing the `linear_graphql` or `jira_rest` tool so it can only read or mutate data inside the
   intended project scope, rather than exposing general workspace-wide tracker access.
 - Reducing the set of client-side tools, credentials, filesystem paths, and network destinations
   available to the agent to the minimum needed for the workflow.
@@ -2472,7 +2635,7 @@ Validation profiles:
 - `Real Integration Profile`: environment-dependent smoke/integration checks RECOMMENDED before
   production use.
 
-Unless otherwise noted, Sections 17.1 through 17.9 are `Core Conformance`. Bullets that begin with
+Unless otherwise noted, Sections 17.1 through 17.10 are `Core Conformance`. Bullets that begin with
 `If ... is implemented` are `Extension Conformance`.
 
 ### 17.1 Workflow and Config Parsing
@@ -2487,9 +2650,12 @@ Unless otherwise noted, Sections 17.1 through 17.9 are `Core Conformance`. Bulle
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when OPTIONAL values are missing
-- `tracker.kind` validation enforces currently supported kinds (`linear`, `beads`)
+- `tracker.kind` validation enforces currently supported kinds (`linear`, `jira`, `beads`)
 - `tracker.api_key` works (including `$VAR` indirection)
-- `$VAR` resolution works for tracker API key and path values
+- `tracker.api_token`, `tracker.email`, `tracker.endpoint`, `tracker.project_key`,
+  `tracker.project_slug`, and `tracker.jql` work for Jira, including `$VAR` indirection where
+  applicable
+- `$VAR` resolution works for tracker credentials and path values
 - `~` path expansion works
 - `codex.command` is preserved as a shell command string
 - Per-state concurrency override map normalizes state names and ignores invalid values
@@ -2525,15 +2691,28 @@ Unless otherwise noted, Sections 17.1 through 17.9 are `Core Conformance`. Bulle
   - Linear query uses the specified project filter field (`slugId`)
   - pagination preserves order across multiple pages
   - issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
-  - request errors, non-200 responses, GraphQL errors, and malformed payloads map to Section 11.5
+  - request errors, non-200 responses, GraphQL errors, and malformed payloads map to Section 11.6
     categories
+- For `tracker.kind == "jira"`:
+  - candidate fetch uses `tracker.jql` when configured
+  - default candidate fetch uses `tracker.project_key`, or `tracker.project_slug` when
+    `tracker.project_key` is absent, and configured active states
+  - Jira requests use Basic auth with configured email and API token
+  - pagination preserves order across multiple pages using `nextPageToken`
+  - issue state refresh query uses stable Jira IDs, or documented key-based IDs if the
+    implementation chooses key-as-ID normalization
+  - ADF descriptions normalize to plain text
+  - Jira labels normalize to labels and support `tracker.required_labels`
+  - blocking `Blocks` issue links map to `blocked_by`
+  - request errors, non-2xx responses, malformed payloads, and pagination integrity failures map to
+    Section 11.6 categories
 - For `tracker.kind == "beads"`:
   - candidate fetch uses `bd ready --json` when available, otherwise status listing plus blocker
     filtering
   - tags normalize to labels and support `tracker.required_labels`
   - blocking dependencies map to `blocked_by`
   - CLI execution errors, missing binary, malformed JSON, and unsupported JSON output map to Section
-    11.5 categories
+    11.6 categories
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
@@ -2542,6 +2721,9 @@ Unless otherwise noted, Sections 17.1 through 17.9 are `Core Conformance`. Bulle
   - For `tracker.kind == "linear"`:
     - `Todo` issue with non-terminal blockers is not eligible
     - `Todo` issue with terminal blockers is eligible
+  - For `tracker.kind == "jira"`:
+    - `To Do` issue with non-terminal blockers is not eligible
+    - `To Do` issue with terminal blockers is eligible
   - For `tracker.kind == "beads"`:
     - Issues with non-terminal blocking dependencies are not eligible.
     - Implementations SHOULD use `bd ready` as the authoritative source for "has no open blockers"
@@ -2588,6 +2770,14 @@ Unless otherwise noted, Sections 17.1 through 17.9 are `Core Conformance`. Bulle
   - top-level GraphQL `errors` produce `success=false` while preserving the GraphQL body
   - invalid arguments, missing auth, and transport failures return structured failure payloads
   - unsupported tool names still fail without stalling the session
+- If the `jira_rest` client-side tool extension is implemented:
+  - the tool is advertised to the session
+  - valid `method` / `path` / `query` / `body` inputs execute against configured Jira auth
+  - absolute URLs, paths outside `/rest/api/`, invalid methods, and invalid argument shapes are
+    rejected
+  - non-2xx HTTP responses produce `success=false` while preserving bounded response context
+  - invalid arguments, missing auth, and transport failures return structured failure payloads
+  - unsupported tool names still fail without stalling the session
 
 ### 17.6 Pi Agent RPC Client
 
@@ -2607,8 +2797,8 @@ If `agent_kind == "pi"` is implemented:
 - Extension UI dialog requests are handled or auto-resolved per documented policy.
 - Token/runtime accounting uses Pi `get_session_stats` and message usage fields.
 - Session identifier is derived from Pi metadata or process lifetime and documented.
-- `beads_cli` or `linear_graphql` client-side tools, if implemented, use the Pi tool-call protocol
-  when `agent_kind == "pi"`.
+- `beads_cli`, `linear_graphql`, or `jira_rest` client-side tools, if implemented, use the Pi
+  tool-call protocol when `agent_kind == "pi"`.
 
 ### 17.7 Observability
 
@@ -2634,11 +2824,34 @@ If `tracker.kind == "beads"` is implemented:
 - Beads `status` maps to `issue.state`.
 - Labels/tags are lowercased.
 - Errors from CLI execution, missing binary, or malformed JSON produce the recommended error
-  categories in Section 11.5.
+  categories in Section 11.6.
 - `deferred` is non-terminal and not dispatch-active by default unless configured in
   `tracker.active_states`.
 
-### 17.9 CLI and Host Lifecycle
+### 17.9 Jira Tracker Adapter (Core Conformance for Jira Support)
+
+If `tracker.kind == "jira"` is implemented:
+
+- Jira connection config validates `tracker.endpoint`, `tracker.email`, and `tracker.api_token`.
+- Jira requests use the configured endpoint and Basic auth credentials.
+- Candidate fetch uses custom `tracker.jql` when configured.
+- Candidate fetch without custom JQL uses `tracker.project_key`, or `tracker.project_slug` when
+  `tracker.project_key` is absent, and configured active states.
+- Terminal-state issue fetch returns issues matching `tracker.terminal_states` for startup cleanup
+  and is project-scoped when `tracker.project_key` or `tracker.project_slug` is configured.
+- Issue-state refresh by ID returns minimal normalized issues.
+- Search requests request labels, assignee, timestamps, priority, status, description, and
+  `issuelinks`.
+- Jira issue keys map to `issue.identifier`.
+- Jira REST IDs map to `issue.id`, unless the implementation documents key-as-ID normalization and
+  applies it consistently to state refresh.
+- Jira ADF descriptions normalize to plain text.
+- Jira labels are lowercased.
+- Blocking `Blocks` issue links are mapped to `blocked_by` with non-blocking links ignored.
+- Errors from transport failures, non-2xx responses, malformed JSON, invalid JQL inputs, or
+  pagination integrity failures produce the recommended error categories in Section 11.6.
+
+### 17.10 CLI and Host Lifecycle
 
 - CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
 - CLI accepts an OPTIONAL startup working directory argument (`-workdir <path>`)
@@ -2653,13 +2866,16 @@ If `tracker.kind == "beads"` is implemented:
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
 
-### 17.10 Real Integration Profile (RECOMMENDED)
+### 17.11 Real Integration Profile (RECOMMENDED)
 
 These checks are RECOMMENDED for production readiness and MAY be skipped in CI when credentials,
 network access, or external service permissions are unavailable.
 
 - A real Linear smoke test can be run with valid credentials supplied by `LINEAR_API_KEY` or a
   documented local bootstrap mechanism (for example `~/.linear_api_key`).
+- A real Jira smoke test can be run with valid credentials supplied by configured Jira environment
+  variables such as `JIRA_EMAIL` and `JIRA_API_TOKEN`, plus an isolated `tracker.project_key`,
+  `tracker.project_slug`, or `tracker.jql`.
 - A real Beads smoke test can be run against an isolated local Beads database/repository using the
   configured `tracker.bd_command`.
 - Real integration tests SHOULD use isolated test identifiers/workspaces and clean up tracker
@@ -2684,7 +2900,7 @@ Use the same validation profiles as Section 17:
 - Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
 - Issue tracker client with candidate fetch + state refresh + terminal fetch, supporting at least
-  one of `linear` or `beads`.
+  one of `linear`, `jira`, or `beads`.
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
@@ -2706,6 +2922,8 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server or RPC session using configured Symphony auth.
+- `jira_rest` client-side tool extension exposes controlled Jira REST API access through the
+  app-server or RPC session using configured Symphony auth.
 - `beads_cli` client-side tool extension exposes controlled Beads CLI access through the app-server
   or RPC session using configured Symphony tracker context.
 - TODO: Persist retry queue and session metadata across process restarts.
@@ -2713,11 +2931,12 @@ Use the same validation profiles as Section 17:
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
   of only via agent tools.
-- TODO: Add pluggable issue tracker adapters beyond Linear and Beads.
+- TODO: Add pluggable issue tracker adapters beyond the first-class Linear, Jira, and Beads
+  adapters.
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)
 
-- Run the `Real Integration Profile` from Section 17.10 with valid credentials and network access.
+- Run the `Real Integration Profile` from Section 17.11 with valid credentials and network access.
 - Verify hook execution and workflow path resolution on the target host OS/shell environment.
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.

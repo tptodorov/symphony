@@ -36,8 +36,8 @@ func Validate(cfg Effective) error {
 		if cfg.TrackerAPIKey == "" {
 			errs = append(errs, errors.New("tracker.api_token is required for jira"))
 		}
-		if cfg.TrackerJQL == "" && cfg.TrackerProjectKey == "" {
-			errs = append(errs, errors.New("tracker.jql or tracker.project_key is required for jira"))
+		if cfg.TrackerJQL == "" && cfg.TrackerProjectKey == "" && cfg.TrackerProjectSlug == "" {
+			errs = append(errs, errors.New("tracker.jql, tracker.project_key, or tracker.project_slug is required for jira"))
 		}
 	case "":
 		errs = append(errs, errors.New("tracker.kind is required"))

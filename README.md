@@ -34,6 +34,11 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+### Workflow examples
+
+See [examples/WORKFLOW.full.md](examples/WORKFLOW.full.md) for a fully expanded workflow
+configuration with Jira, Linear, Beads, Codex, Pi, hooks, polling, workspace, and server settings.
+
 ---
 
 ## License

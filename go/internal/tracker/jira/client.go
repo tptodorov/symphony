@@ -29,7 +29,7 @@ func New(endpoint, email, apiToken, projectKey, jql string, pageSize int) *Clien
 func (c *Client) FetchCandidates(ctx context.Context, cfg config.Effective) ([]domain.Issue, error) {
 	jql := firstNonEmpty(cfg.TrackerJQL, c.JQL)
 	if jql == "" {
-		jql = statesJQL(firstNonEmpty(cfg.TrackerProjectKey, c.ProjectKey), cfg.ActiveStates)
+		jql = statesJQL(c.projectScope(cfg), cfg.ActiveStates)
 	}
 	issues, err := c.search(ctx, cfg, jql)
 	if err != nil {
@@ -80,9 +80,13 @@ func (c *Client) FetchByStates(ctx context.Context, states []string) ([]domain.I
 	return c.search(ctx, config.Effective{TrackerPageSize: c.PageSize}, statesJQL(c.ProjectKey, states))
 }
 
+func (c *Client) projectScope(cfg config.Effective) string {
+	return firstNonEmpty(cfg.TrackerProjectKey, cfg.TrackerProjectSlug, c.ProjectKey)
+}
+
 func (c *Client) search(ctx context.Context, cfg config.Effective, jql string) ([]domain.Issue, error) {
 	if strings.TrimSpace(jql) == "" {
-		return nil, fmt.Errorf("jira jql is required")
+		return nil, fmt.Errorf("jira_jql_required")
 	}
 	pageSize := cfg.TrackerPageSize
 	if pageSize <= 0 {
@@ -97,7 +101,7 @@ func (c *Client) search(ctx context.Context, cfg config.Effective, jql string) (
 		reqBody := map[string]any{
 			"jql":        jql,
 			"maxResults": pageSize,
-			"fields":     []string{"summary", "description", "priority", "status", "assignee", "labels", "created", "updated"},
+			"fields":     []string{"summary", "description", "priority", "status", "assignee", "labels", "created", "updated", "issuelinks"},
 		}
 		if nextPageToken != "" {
 			reqBody["nextPageToken"] = nextPageToken
@@ -106,11 +110,17 @@ func (c *Client) search(ctx context.Context, cfg config.Effective, jql string) (
 		if err := c.do(ctx, reqBody, &resp); err != nil {
 			return nil, err
 		}
+		if resp.Issues == nil {
+			return nil, fmt.Errorf("jira_unknown_payload: issues missing")
+		}
 		for _, issue := range resp.Issues {
 			out = append(out, normalizeIssue(c.Endpoint, issue))
 		}
-		if resp.IsLast || resp.NextPageToken == "" {
+		if resp.IsLast {
 			break
+		}
+		if resp.NextPageToken == "" {
+			return nil, fmt.Errorf("jira_missing_next_page_token")
 		}
 		nextPageToken = resp.NextPageToken
 	}
@@ -124,7 +134,7 @@ func (c *Client) do(ctx context.Context, reqBody map[string]any, data any) error
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.Endpoint, "/")+"/rest/api/3/search/jql", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create jira request: %w", err)
+		return fmt.Errorf("jira_api_request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -135,15 +145,15 @@ func (c *Client) do(ctx context.Context, reqBody map[string]any, data any) error
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("jira request: %w", err)
+		return fmt.Errorf("jira_api_request: %w", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return fmt.Errorf("jira non-2xx status: %d: %s", res.StatusCode, strings.TrimSpace(string(b)))
+		return fmt.Errorf("jira_api_status: %d: %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
 	if err := json.NewDecoder(res.Body).Decode(data); err != nil {
-		return fmt.Errorf("decode jira response: %w", err)
+		return fmt.Errorf("jira_unknown_payload: %w", err)
 	}
 	return nil
 }
@@ -199,9 +209,28 @@ type restIssue struct {
 			EmailAddress string `json:"emailAddress"`
 			AccountID    string `json:"accountId"`
 		} `json:"assignee"`
-		Labels  []string `json:"labels"`
-		Created string   `json:"created"`
-		Updated string   `json:"updated"`
+		Labels  []string    `json:"labels"`
+		Created string      `json:"created"`
+		Updated string      `json:"updated"`
+		Links   []issueLink `json:"issuelinks"`
+	} `json:"fields"`
+}
+
+type issueLink struct {
+	Type *struct {
+		Name string `json:"name"`
+	} `json:"type"`
+	InwardIssue  *linkedIssue `json:"inwardIssue"`
+	OutwardIssue *linkedIssue `json:"outwardIssue"`
+}
+
+type linkedIssue struct {
+	ID     string `json:"id"`
+	Key    string `json:"key"`
+	Fields struct {
+		Status *struct {
+			Name string `json:"name"`
+		} `json:"status"`
 	} `json:"fields"`
 }
 
@@ -230,9 +259,29 @@ func normalizeIssue(endpoint string, issue restIssue) domain.Issue {
 		Assignee:    assignee,
 		URL:         browseURL(endpoint, issue.Key),
 		Labels:      domain.NormalizeLabels(issue.Fields.Labels),
+		BlockedBy:   blockedBy(issue.Fields.Links),
 		CreatedAt:   parseJiraTime(issue.Fields.Created),
 		UpdatedAt:   parseJiraTime(issue.Fields.Updated),
 	}
+}
+
+func blockedBy(links []issueLink) []domain.BlockerRef {
+	out := []domain.BlockerRef{}
+	for _, link := range links {
+		if link.Type == nil || !strings.EqualFold(strings.TrimSpace(link.Type.Name), "Blocks") || link.InwardIssue == nil {
+			continue
+		}
+		state := ""
+		if link.InwardIssue.Fields.Status != nil {
+			state = link.InwardIssue.Fields.Status.Name
+		}
+		out = append(out, domain.BlockerRef{
+			ID:         stringPtr(link.InwardIssue.ID),
+			Identifier: stringPtr(link.InwardIssue.Key),
+			State:      stringPtr(state),
+		})
+	}
+	return out
 }
 
 func browseURL(endpoint, key string) *string {

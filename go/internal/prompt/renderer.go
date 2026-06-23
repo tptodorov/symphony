@@ -15,7 +15,11 @@ var (
 )
 
 func Render(template string, issue domain.Issue, attempt *int) (string, error) {
-	ctx := map[string]any{"issue": issueMap(issue), "attempt": attempt}
+	var attemptValue any
+	if attempt != nil {
+		attemptValue = *attempt
+	}
+	ctx := map[string]any{"issue": issueMap(issue), "attempt": attemptValue}
 	if strings.TrimSpace(template) == "" {
 		desc := ""
 		if issue.Description != nil {
@@ -117,10 +121,10 @@ var knownFilters = map[string]bool{
 	"textileize": true, "textileize_without_paragraph": true,
 	"lightbox": true, "thumbnail": true,
 	"stylesheet_tag": true, "javascript_tag": true,
-	"paginate": true,
-	"asset_url": true,
-	"google_analytics": true,
-	"cache": true,
+	"paginate":           true,
+	"asset_url":          true,
+	"google_analytics":   true,
+	"cache":              true,
 	"content_for_header": true, "content_for_footer": true,
 	"highlight_active": true, "tab_active": true, "cart_count": true,
 	"sample": true, "window": true, "offset": true, "limit": true, "chunk": true,

@@ -206,7 +206,11 @@ func newTracker(cfg config.Effective) (tracker.Tracker, error) {
 	case "beads":
 		return &beads.Tracker{Command: cfg.TrackerBDCommand, WorkDir: cfg.WorkflowDir}, nil
 	case "jira":
-		return jira.New(cfg.TrackerEndpoint, cfg.TrackerEmail, cfg.TrackerAPIKey, cfg.TrackerProjectKey, cfg.TrackerJQL, cfg.TrackerPageSize), nil
+		projectKey := cfg.TrackerProjectKey
+		if projectKey == "" {
+			projectKey = cfg.TrackerProjectSlug
+		}
+		return jira.New(cfg.TrackerEndpoint, cfg.TrackerEmail, cfg.TrackerAPIKey, projectKey, cfg.TrackerJQL, cfg.TrackerPageSize), nil
 	default:
 		return nil, fmt.Errorf("unsupported tracker.kind %q", cfg.TrackerKind)
 	}
