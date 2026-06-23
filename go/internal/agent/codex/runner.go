@@ -83,7 +83,7 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 		tools := []map[string]any{}
 		if req.EnableBeadsCLI {
 			tools = append(tools, map[string]any{
-				"name": "beads_cli",
+				"name":        "beads_cli",
 				"description": "Execute bd CLI commands using the configured tracker.bd_command in the repository working directory.",
 				"input_schema": map[string]any{
 					"type": "object",
@@ -96,12 +96,12 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 		}
 		if req.EnableLinearGraphQL {
 			tools = append(tools, map[string]any{
-				"name": "linear_graphql",
+				"name":        "linear_graphql",
 				"description": "Execute a raw GraphQL query or mutation against Linear using configured tracker auth.",
 				"input_schema": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"query":    map[string]any{"type": "string"},
+						"query":     map[string]any{"type": "string"},
 						"variables": map[string]any{"type": "object"},
 					},
 					"required": []string{"query"},
@@ -169,6 +169,9 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	}
 	if err != nil {
 		return agent.Result{SessionID: sessionID, Usage: usage, Err: fmt.Errorf("codex exited: %w: %s", err, stderr.String())}
+	}
+	if !completed {
+		return agent.Result{SessionID: sessionID, Usage: usage, Err: fmt.Errorf("codex exited without terminal event")}
 	}
 	return agent.Result{SessionID: sessionID, Usage: usage, Completed: completed}
 }

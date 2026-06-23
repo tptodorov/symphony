@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -136,22 +137,24 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 
 	started := time.Now()
 	o.recordAttempt(issue.ID, issue.Identifier, attempt, "", started, string(domain.RunAttemptPreparingWorkspace), nil)
-	ws, created, err := o.workspaces.CreateForIssue(issue.Identifier)
+	if err := o.workspaces.CleanupPreparationDirs(workspace.PreparationRetention); err != nil && o.log != nil {
+		o.log.Warn("workspace preparation cleanup failed", "error", err)
+	}
+	ws, _, err := o.workspaces.PrepareForIssue(ctx, issue.Identifier, cfg.Hooks.AfterCreate, cfg.Hooks.Timeout)
 	if err != nil {
-		o.failDispatchAttempt(issue, attempt, "", err)
+		var hookErr *workspace.PrepareHookError
+		workspacePath := ""
+		if errors.As(err, &hookErr) {
+			workspacePath = hookErr.FailedPath
+			if o.log != nil {
+				observability.HookFailure(o.log, "after_create", err)
+				o.log.Error("workspace preparation retained failed workspace", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "failed_workspace", hookErr.FailedPath)
+			}
+		}
+		o.failDispatchAttempt(issue, attempt, workspacePath, err)
 		return nil
 	}
 	o.updateAttempt(issue.ID, issue.Identifier, attempt, ws.Path, string(domain.RunAttemptPreparingWorkspace), nil)
-	if created && cfg.Hooks.AfterCreate != "" {
-		if err := workspace.RunHook(ctx, cfg.Hooks.AfterCreate, ws.Path, cfg.Hooks.Timeout); err != nil {
-			_ = o.workspaces.RemoveForIssue(context.Background(), issue.Identifier, "", cfg.Hooks.Timeout)
-			if o.log != nil {
-				observability.HookFailure(o.log, "after_create", err)
-			}
-			o.failDispatchAttempt(issue, attempt, ws.Path, err)
-			return nil
-		}
-	}
 	if cfg.Hooks.BeforeRun != "" {
 		if err := workspace.RunHook(ctx, cfg.Hooks.BeforeRun, ws.Path, cfg.Hooks.Timeout); err != nil {
 			if o.log != nil {
@@ -386,6 +389,9 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 	r.error = nil
 	if !res.Completed {
 		r.status = "failed"
+		if res.Err == nil {
+			res.Err = fmt.Errorf("agent exited without terminal event")
+		}
 	}
 	if res.Err != nil {
 		r.status = "failed"

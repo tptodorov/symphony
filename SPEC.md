@@ -477,7 +477,7 @@ Fields:
 Fields:
 
 - `after_create` (multiline shell script string, OPTIONAL)
-  - Runs only when a workspace directory is newly created.
+  - Runs during staged workspace preparation when the canonical workspace is missing or empty.
   - Failure aborts workspace creation.
 - `before_run` (multiline shell script string, OPTIONAL)
   - Runs before each agent attempt after workspace preparation and before launching the coding
@@ -995,15 +995,26 @@ Part B: Tracker state refresh
   - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
 - If state refresh fails, keep workers running and try again on the next tick.
 
-### 8.6 Startup Terminal Workspace Cleanup
+### 8.6 Startup Workspace Cleanup
 
 When the service starts:
 
-1. Query tracker for issues in terminal states.
-2. For each returned issue identifier, remove the corresponding workspace directory.
-3. If the terminal-issues fetch fails, log a warning and continue startup.
+1. Remove entries older than 24 hours from `<workspace.root>/.preparing` and
+   `<workspace.root>/.failed`.
+2. List existing canonical workspace directory names under `workspace.root`, excluding `.preparing`
+   and `.failed`.
+3. If the selected tracker supports state refresh by issue identifier, fetch current states for those
+   existing workspace identifiers and remove only the corresponding canonical workspaces whose
+   refreshed state is in `tracker.terminal_states`.
+4. If the selected tracker does not support identifier refresh, query tracker issues in
+   `tracker.terminal_states` and remove the corresponding canonical workspace directories.
+5. If workspace listing or tracker fetch fails, log a warning and continue startup.
 
-This prevents stale terminal workspaces from accumulating after restarts.
+Startup cleanup is conservative. A workspace is preserved when the tracker reports the issue as
+active, reports it as non-active but non-terminal, omits it from the refresh result, or cannot be
+queried. This prevents stale terminal workspaces and abandoned preparation artifacts from
+accumulating after restarts without deleting workspaces that might still be useful for retries or
+diagnosis.
 
 ## 9. Workspace Management and Safety
 
@@ -1017,10 +1028,19 @@ Per-issue workspace path:
 
 - `<workspace.root>/<sanitized_issue_identifier>`
 
+Reserved internal workspace paths:
+
+- `<workspace.root>/.preparing/<sanitized_issue_identifier>-<unique_suffix>`
+- `<workspace.root>/.failed/<sanitized_issue_identifier>-<unique_suffix>`
+- These directories MUST NOT be treated as issue identifiers during workspace listing or startup
+  terminal cleanup.
+
 Workspace persistence:
 
 - Workspaces are reused across runs for the same issue.
 - Successful runs do not auto-delete workspaces.
+- Failed runs and retries do not auto-delete non-empty canonical workspaces.
+- Empty canonical workspaces are considered unprepared when `hooks.after_create` is configured.
 
 ### 9.2 Workspace Creation and Reuse
 
@@ -1029,17 +1049,31 @@ Input: `issue.identifier`
 Algorithm summary:
 
 1. Sanitize identifier to `workspace_key`.
-2. Compute workspace path under workspace root.
-3. Ensure the workspace path exists as a directory.
-4. Mark `created_now=true` only if the directory was created during this call; otherwise
-   `created_now=false`.
-5. If `created_now=true`, run `after_create` hook if configured.
+2. Compute canonical workspace path `<workspace.root>/<workspace_key>`.
+3. If the canonical workspace exists and is a non-empty directory, reuse it and do not run
+   `hooks.after_create`.
+4. If the canonical workspace exists and is an empty directory while `hooks.after_create` is
+   configured, treat it as unprepared.
+5. If no `hooks.after_create` hook is configured, create or reuse the canonical workspace directly.
+6. If `hooks.after_create` is configured and the canonical workspace is missing or empty, create a
+   staging workspace under `<workspace.root>/.preparing`.
+7. Run `hooks.after_create` in the staging workspace.
+8. On success, promote the staging workspace to the canonical workspace path and use that canonical
+   workspace for the run.
+9. On failure, move the staging workspace to `<workspace.root>/.failed`, fail the current attempt,
+   and do not dispatch the coding agent.
+10. Write `prepare-error.txt` in the retained failed workspace with the bounded `after_create` error
+    details.
 
 Notes:
 
 - This section does not assume any specific repository/VCS workflow.
 - Workspace preparation beyond directory creation (for example dependency bootstrap, checkout/sync,
   code generation) is implementation-defined and is typically handled via hooks.
+- Promotion SHOULD be an atomic rename within the same workspace root when the host filesystem
+  supports it.
+- Before a new staging preparation, implementations SHOULD remove entries older than 24 hours from
+  `.preparing` and `.failed`.
 
 ### 9.3 OPTIONAL Workspace Population (Implementation-Defined)
 
@@ -1051,10 +1085,14 @@ hooks (for example `after_create` and/or `before_run`).
 Failure handling:
 
 - Workspace population/synchronization failures return an error for the current attempt.
-- If failure happens while creating a brand-new workspace, implementations MAY remove the partially
-  prepared directory.
-- Reused workspaces SHOULD NOT be destructively reset on population failure unless that policy is
-  explicitly chosen and documented.
+- If `hooks.after_create` fails in a staging workspace, retain the failed staging workspace under
+  `<workspace.root>/.failed` for diagnosis and include that path in logs or status where possible.
+- Retained failed staging workspaces MUST contain `prepare-error.txt` with the hook failure summary
+  so failures can be diagnosed even when the hook failed before writing any repository files.
+- Failed staging workspaces older than 24 hours are cleaned up automatically.
+- Reused non-empty canonical workspaces are not destructively reset on population failure. A
+  `hooks.before_run` failure, agent failure, timeout, or retry preserves the canonical workspace
+  unless the issue later reaches a configured terminal state.
 
 ### 9.4 Workspace Hooks
 
@@ -1071,12 +1109,17 @@ Execution contract:
   `cwd`.
 - On POSIX systems, `sh -lc <script>` (or a stricter equivalent such as `bash -lc <script>`) is a
   conforming default.
+- Hooks inherit the Symphony process environment.
+- `SYMPHONY_WORKDIR` MUST be set to the effective absolute working directory after applying the
+  runtime `-workdir` option. Workflows MAY use it to locate the source checkout that owns
+  `WORKFLOW.md`.
 - Hook timeout uses `hooks.timeout_ms`; default: `60000 ms`.
 - Log hook start, failures, and timeouts.
 
 Failure semantics:
 
-- `after_create` failure or timeout is fatal to workspace creation.
+- `after_create` failure or timeout is fatal to workspace creation. The failed staging workspace is
+  retained under `.failed` and the canonical workspace is not promoted.
 - `before_run` failure or timeout is fatal to the current run attempt.
 - `after_run` failure or timeout is logged and ignored.
 - `before_remove` failure or timeout is logged and ignored.
@@ -2667,10 +2710,17 @@ Unless otherwise noted, Sections 17.1 through 17.10 are `Core Conformance`. Bull
 - Deterministic workspace path per issue identifier
 - Missing workspace directory is created
 - Existing workspace directory is reused
+- Internal `.preparing` and `.failed` directories are excluded from issue workspace listing
+- Staged workspace preparation runs `after_create` before promoting to the canonical workspace path
+- Empty canonical workspaces are treated as unprepared when `after_create` is configured
+- Failed staged preparation is retained under `.failed` and does not leave an empty canonical
+  workspace to be reused
+- Failed staged preparation writes `prepare-error.txt` into the retained failed workspace
+- `.preparing` and `.failed` entries older than 24 hours are cleaned up
 - Existing non-directory path at workspace location is handled safely (replace or fail per
   implementation policy)
 - OPTIONAL workspace population/synchronization errors are surfaced
-- `after_create` hook runs only on new workspace creation
+- `after_create` hook runs only during staged preparation of missing or empty canonical workspaces
 - `before_run` hook runs before each attempt and failure/timeouts abort the current attempt
 - `after_run` hook runs after each attempt and failure/timeouts are logged and ignored
 - `before_remove` hook runs on cleanup and failures/timeouts are ignored
@@ -2857,6 +2907,8 @@ If `tracker.kind == "jira"` is implemented:
 - CLI accepts an OPTIONAL startup working directory argument (`-workdir <path>`)
 - CLI applies `-workdir` before resolving the default workflow path or a relative positional
   workflow path
+- CLI exports `SYMPHONY_WORKDIR` as the effective absolute working directory after applying
+  `-workdir`
 - CLI uses `./WORKFLOW.md` in the effective working directory when no workflow path argument is
   provided
 - CLI help shows the positional workflow path form (`[path-to-WORKFLOW.md]`)

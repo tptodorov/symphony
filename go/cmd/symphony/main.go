@@ -44,6 +44,9 @@ func run() error {
 			return fmt.Errorf("change workdir: %w", err)
 		}
 	}
+	if err := setRuntimeEnv(); err != nil {
+		return err
+	}
 	logWriter := io.Writer(os.Stdout)
 	if opts.LogsRoot != "" {
 		if err := os.MkdirAll(opts.LogsRoot, 0o700); err != nil {
@@ -64,6 +67,17 @@ func run() error {
 		return err
 	}
 	return a.Run(ctx)
+}
+
+func setRuntimeEnv() error {
+	workdir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve workdir: %w", err)
+	}
+	if err := os.Setenv("SYMPHONY_WORKDIR", workdir); err != nil {
+		return fmt.Errorf("set SYMPHONY_WORKDIR: %w", err)
+	}
+	return nil
 }
 
 func parseArgs(args []string, name string, output io.Writer) (cliOptions, error) {

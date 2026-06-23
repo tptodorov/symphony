@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"os"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,33 @@ func TestParseArgsDefaultsWorkflow(t *testing.T) {
 	}
 	if opts.WorkDir != "" {
 		t.Fatalf("workdir=%q", opts.WorkDir)
+	}
+}
+
+func TestSetRuntimeEnvExportsEffectiveWorkdir(t *testing.T) {
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SYMPHONY_WORKDIR", "")
+	if err := setRuntimeEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("SYMPHONY_WORKDIR"); got != want {
+		t.Fatalf("SYMPHONY_WORKDIR=%q, want %q", got, want)
 	}
 }
 

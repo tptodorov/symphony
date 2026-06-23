@@ -65,12 +65,19 @@ func TestDispatchPreparationFailureSchedulesRetry(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cfg.WorkspaceRoot, "A-1")); !os.IsNotExist(err) {
 		t.Fatalf("failed after_create workspace should be removed, stat err=%v", err)
 	}
+	failed, err := filepath.Glob(filepath.Join(cfg.WorkspaceRoot, workspace.FailedDirName, "A-1-*"))
+	if err != nil || len(failed) != 1 {
+		t.Fatalf("failed preparation workspace not retained: %v %#v", err, failed)
+	}
 	o.mu.Lock()
 	hist := append([]domain.RunAttempt(nil), o.runHistory["1"]...)
 	attempt := o.attempts["1"]
 	o.mu.Unlock()
 	if attempt != 1 || len(hist) != 1 || hist[0].Attempt != 0 || hist[0].Status != domain.RunAttemptFailed || hist[0].Error == nil {
 		t.Fatalf("attempt state mismatch: attempt=%d hist=%+v", attempt, hist)
+	}
+	if hist[0].WorkspacePath != failed[0] {
+		t.Fatalf("history should point at retained failed workspace: %+v failed=%s", hist[0], failed[0])
 	}
 
 	if err := o.Tick(context.Background()); err != nil {

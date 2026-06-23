@@ -27,6 +27,36 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNewCleansOldPreparationWorkspaces(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "work")
+	oldFailed := filepath.Join(root, workspace.FailedDirName, "A-1-old")
+	newPreparing := filepath.Join(root, workspace.PreparingDirName, "A-1-new")
+	for _, path := range []string{oldFailed, newPreparing} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(oldFailed, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	wf := filepath.Join(dir, "WORKFLOW.md")
+	body := "---\ntracker:\n  kind: linear\n  api_key: k\n  project_slug: p\nworkspace:\n  root: " + root + "\n---\nPrompt"
+	if err := os.WriteFile(wf, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(context.Background(), Options{WorkflowPath: wf, Tracker: &trackerfake.Tracker{}, Runner: &agentfake.Runner{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldFailed); !os.IsNotExist(err) {
+		t.Fatalf("old failed workspace should be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(newPreparing); err != nil {
+		t.Fatalf("new preparing workspace should remain: %v", err)
+	}
+}
+
 func TestRunStartsEphemeralStatusServer(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.WorkspaceRoot = t.TempDir()

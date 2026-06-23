@@ -141,6 +141,9 @@ func (a *App) watch(ctx context.Context) {
 	}
 }
 func startupCleanup(ctx context.Context, cfg config.Effective, tr tracker.Tracker, wm workspace.Manager, log *slog.Logger) {
+	if err := wm.CleanupPreparationDirs(workspace.PreparationRetention); err != nil && log != nil {
+		log.Warn("workspace preparation cleanup failed", "error", err)
+	}
 	if keyFetcher, ok := tr.(interface {
 		FetchStatesByIdentifier(context.Context, []string) (map[string]domain.Issue, error)
 	}); ok {
