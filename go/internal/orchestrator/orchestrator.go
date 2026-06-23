@@ -3,12 +3,14 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/openai/symphony/go/internal/agent"
 	"github.com/openai/symphony/go/internal/config"
 	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/observability"
 	"github.com/openai/symphony/go/internal/prompt"
 	"github.com/openai/symphony/go/internal/tracker"
 	"github.com/openai/symphony/go/internal/workspace"
@@ -30,10 +32,15 @@ type Orchestrator struct {
 	totals     domain.AgentTotals
 	rateLimits map[string]any
 	runHistory map[string][]domain.RunAttempt
+	log        *slog.Logger
 }
 
 func New(cfg config.Effective, tr tracker.Tracker, runner agent.Runner, wm workspace.Manager) *Orchestrator {
-	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]bool{}, retries: map[string]retryItem{}, rateLimits: nil, runHistory: map[string][]domain.RunAttempt{}}
+	return NewWithLogger(cfg, tr, runner, wm, nil)
+}
+
+func NewWithLogger(cfg config.Effective, tr tracker.Tracker, runner agent.Runner, wm workspace.Manager, log *slog.Logger) *Orchestrator {
+	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]bool{}, retries: map[string]retryItem{}, rateLimits: nil, runHistory: map[string][]domain.RunAttempt{}, log: log}
 }
 
 func (o *Orchestrator) UpdateConfig(cfg config.Effective) { o.mu.Lock(); o.cfg = cfg; o.mu.Unlock() }
@@ -44,14 +51,24 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.mu.Unlock()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	_ = o.Tick(ctx)
+	if o.log != nil {
+		o.log.Info("orchestrator started", "polling_interval_ms", interval.Milliseconds())
+	}
+	if err := o.Tick(ctx); err != nil && o.log != nil {
+		observability.TrackerError(o.log, err)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			o.cancelAll()
+			if o.log != nil {
+				o.log.Info("orchestrator stopped")
+			}
 			return nil
 		case <-ticker.C:
-			_ = o.Tick(ctx)
+			if err := o.Tick(ctx); err != nil && o.log != nil {
+				observability.TrackerError(o.log, err)
+			}
 			o.mu.Lock()
 			if o.cfg.PollingInterval != interval {
 				interval = o.cfg.PollingInterval
@@ -72,6 +89,9 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 	candidates, err := o.tracker.FetchCandidates(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("fetch candidates: %w", err)
+	}
+	if o.log != nil {
+		o.log.Info("poll completed", "candidate_count", len(candidates))
 	}
 	candidateMap := make(map[string]domain.Issue)
 	for _, issue := range candidates {
@@ -121,12 +141,18 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	if created && cfg.Hooks.AfterCreate != "" {
 		if err := workspace.RunHook(ctx, cfg.Hooks.AfterCreate, ws.Path, cfg.Hooks.Timeout); err != nil {
 			o.releaseClaim(issue.ID)
+			if o.log != nil {
+				observability.HookFailure(o.log, "after_create", err)
+			}
 			return err
 		}
 	}
 	if cfg.Hooks.BeforeRun != "" {
 		if err := workspace.RunHook(ctx, cfg.Hooks.BeforeRun, ws.Path, cfg.Hooks.Timeout); err != nil {
 			o.releaseClaim(issue.ID)
+			if o.log != nil {
+				observability.HookFailure(o.log, "before_run", err)
+			}
 			return err
 		}
 	}
@@ -145,10 +171,15 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	sessionID := fmt.Sprintf("%s-%d", domain.SanitizeWorkspaceKey(issue.Identifier), time.Now().UnixNano())
 	rctx, cancel := context.WithCancel(ctx)
 	o.mu.Lock()
-	o.running[issue.ID] = running{issue: issue, sessionID: sessionID, workspace: ws.Path, started: time.Now(), lastEvent: time.Now(), status: "running", cancel: cancel}
+	started := time.Now()
+	o.running[issue.ID] = running{issue: issue, sessionID: sessionID, workspace: ws.Path, started: started, lastEvent: started, status: "running", lastEventType: "session_started", cancel: cancel}
 	delete(o.claimed, issue.ID)
 	delete(o.cancelled, issue.ID)
 	o.mu.Unlock()
+	if o.log != nil {
+		observability.Dispatch(o.log, issue.ID, issue.Identifier, sessionID)
+		observability.WorkerStart(o.log, issue.ID, issue.Identifier, sessionID)
+	}
 	ch := make(chan agent.Event, 32)
 	go o.forwardEvents(ch)
 	now := time.Now()
@@ -272,10 +303,15 @@ func (o *Orchestrator) dueRetryIDs() []string {
 
 func (o *Orchestrator) forwardEvents(ch <-chan agent.Event) {
 	for ev := range ch {
+		if ev.At.IsZero() {
+			ev.At = time.Now()
+		}
 		o.mu.Lock()
 		o.events = append(o.events, ev)
 		if r := o.running[ev.IssueID]; r.sessionID != "" {
-			r.lastEvent = time.Now()
+			r.lastEvent = ev.At
+			r.lastEventType = ev.Type
+			r.lastMessage = ev.Message
 			if ev.Type == "turn_completed" || ev.Type == "turn_started" {
 				r.turnCount++
 			}
@@ -320,7 +356,8 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 	o.totals.SecondsRunning += elapsed.Seconds()
 	attempt := o.attempts[issue.ID]
 	finalStatus := r.status
-	if o.cancelled[issue.ID] {
+	wasCancelled := o.cancelled[issue.ID]
+	if wasCancelled {
 		delete(o.cancelled, issue.ID)
 		finalStatus = "canceled_by_reconciliation"
 	}
@@ -334,12 +371,19 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 			o.runHistory[issue.ID] = hist
 		}
 	}
-	if o.cancelled[issue.ID] {
+	if wasCancelled {
+		if o.log != nil {
+			o.log.Info("worker exit", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "session_id", r.sessionID, "status", finalStatus)
+		}
 		return
 	}
 	if res.Completed {
 		o.completed[issue.ID] = time.Now()
 		o.retries[issue.ID] = retryItem{issue: issue, attempt: 1, at: time.Now().Add(time.Second)}
+		if o.log != nil {
+			o.log.Info("worker exit", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "session_id", r.sessionID, "status", finalStatus, "completed", true)
+			observability.RetryScheduled(o.log, issue.ID, issue.Identifier, time.Second)
+		}
 		return
 	}
 	o.attempts[issue.ID]++
@@ -347,7 +391,15 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 	if res.Err != nil {
 		delay = backoff(o.attempts[issue.ID], o.cfg.Agent.MaxRetryBackoff)
 	}
-	o.retries[issue.ID] = retryItem{issue: issue, attempt: o.attempts[issue.ID], at: time.Now().Add(delay)}
+	errStr := ""
+	if r.error != nil {
+		errStr = *r.error
+	}
+	o.retries[issue.ID] = retryItem{issue: issue, attempt: o.attempts[issue.ID], at: time.Now().Add(delay), err: errStr}
+	if o.log != nil {
+		o.log.Info("worker exit", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "session_id", r.sessionID, "status", finalStatus, "error", r.error)
+		observability.RetryScheduled(o.log, issue.ID, issue.Identifier, delay)
+	}
 }
 
 func (o *Orchestrator) reconcile(ctx context.Context) error {
@@ -378,12 +430,18 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 				r.cancel()
 				o.cancelled[id] = true
 				o.completed[id] = time.Now()
+				if o.log != nil {
+					observability.Reconciliation(o.log, id, r.issue.Identifier, "terminal_cancel")
+				}
 				go func(identifier string, hooks domain.HooksConfig) {
 					_ = o.workspaces.RemoveForIssue(context.Background(), identifier, hooks.BeforeRemove, hooks.Timeout)
 				}(r.issue.Identifier, cfg.Hooks)
 			} else if !containsNorm(cfg.ActiveStates, issue.State) || !domain.IssueIsEligible(issue, cfg) {
 				r.cancel()
 				o.cancelled[id] = true
+				if o.log != nil {
+					observability.Reconciliation(o.log, id, r.issue.Identifier, "inactive_cancel")
+				}
 			} else {
 				r.issue = issue
 				o.running[id] = r
@@ -421,54 +479,157 @@ func (o *Orchestrator) Snapshot() Snapshot {
 		RateLimits:  o.rateLimits,
 	}
 	for _, r := range o.running {
-		sn := RunningSnapshot{
-			IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, SessionID: r.sessionID,
-			Workspace: r.workspace, TurnCount: r.turnCount, Status: r.status,
-			LastEvent: r.lastEvent.Format(time.RFC3339), StartedAt: &r.started, LastEventAt: &r.lastEvent,
-		}
-		if r.issue.URL != nil {
-			url := *r.issue.URL
-			sn.IssueURL = &url
-		}
-		if r.error != nil {
-			sn.Error = *r.error
-		}
-		if r.agentTotalTokens != 0 || r.agentInputTokens != 0 || r.agentOutputTokens != 0 {
-			sn.Tokens = &domain.TokenUsage{
-				InputTokens: r.agentInputTokens, OutputTokens: r.agentOutputTokens, TotalTokens: r.agentTotalTokens,
-			}
-		}
-		if r := o.attempts[sn.IssueID]; r > 0 {
-			sn.Attempts = &AttemptsSnapshot{
-				RestartCount: r - 1,
-				CurrentRetryAttempt: r,
-			}
-		}
-		s.Running = append(s.Running, sn)
+		s.Running = append(s.Running, o.runningSnapshotLocked(r))
 	}
 	for _, r := range o.retries {
-		err := ""
-		if r.issue.UpdatedAt != nil && !r.issue.UpdatedAt.IsZero() {
-			_ = r.issue.UpdatedAt
-		}
-		sn := RetrySnapshot{IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, Attempt: r.attempt, At: r.at, Error: err}
-		s.RetryQueue = append(s.RetryQueue, sn)
+		s.Retrying = append(s.Retrying, retrySnapshot(r))
 	}
+	s.RetryQueue = append([]RetrySnapshot(nil), s.Retrying...)
 	return s
 }
 
-func (o *Orchestrator) IssueSnapshot(identifier string) (domain.Issue, bool) {
+func (o *Orchestrator) IssueSnapshot(identifier string) (IssueDetailSnapshot, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for _, r := range o.running {
 		if r.issue.Identifier == identifier {
-			return r.issue, true
+			sn := o.runningSnapshotLocked(r)
+			return o.issueDetailLocked(r.issue, "running", &sn, nil), true
 		}
 	}
 	for _, r := range o.retries {
 		if r.issue.Identifier == identifier {
-			return r.issue, true
+			sn := retrySnapshot(r)
+			return o.issueDetailLocked(r.issue, "retrying", nil, &sn), true
 		}
 	}
-	return domain.Issue{}, false
+	return IssueDetailSnapshot{}, false
+}
+
+func (o *Orchestrator) runningSnapshotLocked(r running) RunningSnapshot {
+	sn := RunningSnapshot{
+		IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, SessionID: r.sessionID,
+		Workspace: r.workspace, TurnCount: r.turnCount, State: r.issue.State, Status: r.status,
+		LastEvent: r.lastEventType, LastMessage: r.lastMessage, StartedAt: &r.started, LastEventAt: &r.lastEvent,
+	}
+	if r.issue.URL != nil {
+		url := *r.issue.URL
+		sn.IssueURL = &url
+	}
+	if r.error != nil {
+		sn.Error = *r.error
+	}
+	if r.agentTotalTokens != 0 || r.agentInputTokens != 0 || r.agentOutputTokens != 0 {
+		sn.Tokens = &domain.TokenUsage{
+			InputTokens: r.agentInputTokens, OutputTokens: r.agentOutputTokens, TotalTokens: r.agentTotalTokens,
+		}
+	}
+	attempts := o.attemptsSnapshotLocked(r.issue.ID)
+	if attempts.RestartCount != 0 || attempts.CurrentRetryAttempt != 0 {
+		sn.Attempts = &attempts
+	}
+	return sn
+}
+
+func (o *Orchestrator) attemptsSnapshotLocked(issueID string) AttemptsSnapshot {
+	attempt := o.attempts[issueID]
+	if attempt <= 0 {
+		return AttemptsSnapshot{}
+	}
+	return AttemptsSnapshot{RestartCount: attempt - 1, CurrentRetryAttempt: attempt}
+}
+
+func retrySnapshot(r retryItem) RetrySnapshot {
+	due := r.at
+	sn := RetrySnapshot{IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, Attempt: r.attempt, DueAt: r.at, At: &due, Error: r.err}
+	if r.issue.URL != nil {
+		url := *r.issue.URL
+		sn.IssueURL = &url
+	}
+	return sn
+}
+
+func (o *Orchestrator) issueDetailLocked(issue domain.Issue, status string, running *RunningSnapshot, retry *RetrySnapshot) IssueDetailSnapshot {
+	workspace := o.workspaceSnapshotLocked(issue.ID, running)
+	lastError := o.lastErrorLocked(issue.ID, running, retry)
+	return IssueDetailSnapshot{
+		IssueIdentifier: issue.Identifier,
+		IssueID:         issue.ID,
+		Status:          status,
+		Workspace:       workspace,
+		Attempts:        o.attemptsSnapshotLocked(issue.ID),
+		Running:         running,
+		Retry:           retry,
+		Logs:            LogsSnapshot{CodexSessionLogs: []LogSnapshot{}},
+		RecentEvents:    o.recentEventsLocked(issue.ID, 20),
+		LastError:       lastError,
+		Tracked:         trackedIssue(issue),
+	}
+}
+
+func (o *Orchestrator) workspaceSnapshotLocked(issueID string, running *RunningSnapshot) *WorkspaceSnapshot {
+	if running != nil && running.Workspace != "" {
+		return &WorkspaceSnapshot{Path: running.Workspace}
+	}
+	hist := o.runHistory[issueID]
+	for i := len(hist) - 1; i >= 0; i-- {
+		if hist[i].WorkspacePath != "" {
+			return &WorkspaceSnapshot{Path: hist[i].WorkspacePath}
+		}
+	}
+	return nil
+}
+
+func (o *Orchestrator) lastErrorLocked(issueID string, running *RunningSnapshot, retry *RetrySnapshot) *string {
+	if running != nil && running.Error != "" {
+		err := running.Error
+		return &err
+	}
+	if retry != nil && retry.Error != "" {
+		err := retry.Error
+		return &err
+	}
+	hist := o.runHistory[issueID]
+	for i := len(hist) - 1; i >= 0; i-- {
+		if hist[i].Error != nil && *hist[i].Error != "" {
+			return hist[i].Error
+		}
+	}
+	return nil
+}
+
+func (o *Orchestrator) recentEventsLocked(issueID string, limit int) []EventSnapshot {
+	events := []EventSnapshot{}
+	for i := len(o.events) - 1; i >= 0 && len(events) < limit; i-- {
+		ev := o.events[i]
+		if ev.IssueID != issueID {
+			continue
+		}
+		at := ev.At
+		if at.IsZero() {
+			at = time.Now()
+		}
+		events = append(events, EventSnapshot{At: at, Event: ev.Type, Message: ev.Message})
+	}
+	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+		events[i], events[j] = events[j], events[i]
+	}
+	return events
+}
+
+func trackedIssue(issue domain.Issue) map[string]any {
+	tracked := map[string]any{
+		"title": issue.Title,
+		"state": issue.State,
+	}
+	if issue.Assignee != nil {
+		tracked["assignee"] = *issue.Assignee
+	}
+	if issue.Priority != nil {
+		tracked["priority"] = *issue.Priority
+	}
+	if len(issue.Labels) > 0 {
+		tracked["labels"] = append([]string(nil), issue.Labels...)
+	}
+	return tracked
 }

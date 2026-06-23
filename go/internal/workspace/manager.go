@@ -16,6 +16,27 @@ type Manager struct{ Root string }
 
 func NewManager(root string) Manager { return Manager{Root: root} }
 
+func (m Manager) ListIssueIdentifiers() ([]string, error) {
+	root, err := filepath.Abs(m.Root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace root: %w", err)
+	}
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read workspace root: %w", err)
+	}
+	identifiers := []string{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			identifiers = append(identifiers, entry.Name())
+		}
+	}
+	return identifiers, nil
+}
+
 func (m Manager) CreateForIssue(identifier string) (Workspace, bool, error) {
 	root, err := filepath.Abs(m.Root)
 	if err != nil {

@@ -26,6 +26,19 @@ func Validate(cfg Effective) error {
 		} else if !isCommandReachable(cfg.TrackerBDCommand) {
 			errs = append(errs, fmt.Errorf("tracker.bd_command %q is not reachable", cfg.TrackerBDCommand))
 		}
+	case "jira":
+		if cfg.TrackerEndpoint == "" {
+			errs = append(errs, errors.New("tracker.endpoint is required for jira"))
+		}
+		if cfg.TrackerEmail == "" {
+			errs = append(errs, errors.New("tracker.email is required for jira"))
+		}
+		if cfg.TrackerAPIKey == "" {
+			errs = append(errs, errors.New("tracker.api_token is required for jira"))
+		}
+		if cfg.TrackerJQL == "" && cfg.TrackerProjectKey == "" {
+			errs = append(errs, errors.New("tracker.jql or tracker.project_key is required for jira"))
+		}
 	case "":
 		errs = append(errs, errors.New("tracker.kind is required"))
 	default:
@@ -39,6 +52,9 @@ func Validate(cfg Effective) error {
 	}
 	if cfg.Agent.MaxRetryBackoff < 0 {
 		errs = append(errs, errors.New("agent.max_retry_backoff_ms must be non-negative"))
+	}
+	if cfg.TrackerPageSize <= 0 {
+		errs = append(errs, errors.New("tracker.page_size must be positive"))
 	}
 	if cfg.Hooks.Timeout <= 0 {
 		errs = append(errs, errors.New("hooks.timeout_ms must be positive"))
@@ -58,6 +74,9 @@ func Validate(cfg Effective) error {
 	}
 	if cfg.Pi.SessionSync != "" && cfg.Pi.SessionSync != "none" && cfg.Pi.SessionSync != "export" && cfg.Pi.SessionSync != "sync" {
 		errs = append(errs, errors.New("pi.session_sync must be none, export, or sync"))
+	}
+	if cfg.ServerPortSet && cfg.ServerPort < 0 {
+		errs = append(errs, errors.New("server.port must be non-negative"))
 	}
 	return errors.Join(errs...)
 }

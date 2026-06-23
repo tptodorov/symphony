@@ -39,3 +39,59 @@ func TestInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveJira(t *testing.T) {
+	t.Setenv("JIRA_TOKEN", "token")
+	wf := domain.WorkflowDefinition{Config: map[string]any{
+		"tracker": map[string]any{
+			"kind":        "jira",
+			"endpoint":    "https://example.atlassian.net",
+			"email":       "user@example.com",
+			"api_token":   "$JIRA_TOKEN",
+			"project_key": "MOD",
+			"jql":         "project = MOD",
+			"page_size":   25,
+		},
+	}}
+	cfg, err := Resolve(wf, filepath.Join(t.TempDir(), "WORKFLOW.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrackerAPIKey != "token" || cfg.TrackerEmail != "user@example.com" || cfg.TrackerProjectKey != "MOD" || cfg.TrackerJQL != "project = MOD" || cfg.TrackerPageSize != 25 {
+		t.Fatalf("%+v", cfg)
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJiraRequiresEndpoint(t *testing.T) {
+	cfg, err := Resolve(domain.WorkflowDefinition{Config: map[string]any{"tracker": map[string]any{"kind": "jira", "email": "user@example.com", "api_token": "token", "project_key": "MOD"}}}, "WORKFLOW.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(cfg); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestResolveServerPortPresence(t *testing.T) {
+	cfg, err := Resolve(domain.WorkflowDefinition{Config: map[string]any{}}, "WORKFLOW.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerPortSet {
+		t.Fatal("server.port should be unset when absent")
+	}
+	cfg, err = Resolve(domain.WorkflowDefinition{Config: map[string]any{"server": map[string]any{"port": 0}}}, "WORKFLOW.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ServerPortSet || cfg.ServerPort != 0 {
+		t.Fatalf("server.port presence not preserved: %+v", cfg)
+	}
+	cfg.ServerPort = -1
+	if err := Validate(cfg); err == nil {
+		t.Fatal("expected negative server.port to be invalid")
+	}
+}

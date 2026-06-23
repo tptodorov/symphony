@@ -9,9 +9,13 @@ type EffectiveConfig struct {
 	TrackerKind         string
 	TrackerEndpoint     string
 	TrackerAPIKey       string
+	TrackerEmail        string
+	TrackerProjectKey   string
 	TrackerProjectSlug  string
 	TrackerBDCommand    string
 	TrackerAssignee     string
+	TrackerJQL          string
+	TrackerPageSize     int
 	RequiredLabels      []string
 	ActiveStates        []string
 	TerminalStates      []string
@@ -23,6 +27,7 @@ type EffectiveConfig struct {
 	Pi                  PiConfig
 	PerStateConcurrency map[string]int
 	ServerPort          int
+	ServerPortSet       bool
 	EnableBeadsCLI      bool
 	EnableLinearGraphQL bool
 }

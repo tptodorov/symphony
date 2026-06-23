@@ -22,10 +22,20 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 	cfg.AgentKind = str(m, "agent_kind", cfg.AgentKind)
 	cfg.TrackerKind = str(m, "tracker.kind", cfg.TrackerKind)
 	cfg.TrackerEndpoint = str(m, "tracker.endpoint", cfg.TrackerEndpoint)
+	if cfg.TrackerKind == "jira" {
+		if _, ok := lookup(m, "tracker.endpoint"); !ok {
+			cfg.TrackerEndpoint = ""
+		}
+	}
 	cfg.TrackerAPIKey = str(m, "tracker.api_key", cfg.TrackerAPIKey)
+	cfg.TrackerAPIKey = str(m, "tracker.api_token", cfg.TrackerAPIKey)
+	cfg.TrackerEmail = str(m, "tracker.email", cfg.TrackerEmail)
+	cfg.TrackerProjectKey = str(m, "tracker.project_key", cfg.TrackerProjectKey)
 	cfg.TrackerProjectSlug = str(m, "tracker.project_slug", cfg.TrackerProjectSlug)
 	cfg.TrackerAssignee = str(m, "tracker.assignee", cfg.TrackerAssignee)
 	cfg.TrackerBDCommand = str(m, "tracker.bd_command", cfg.TrackerBDCommand)
+	cfg.TrackerJQL = str(m, "tracker.jql", cfg.TrackerJQL)
+	cfg.TrackerPageSize = integer(m, "tracker.page_size", cfg.TrackerPageSize)
 	cfg.RequiredLabels = stringSlice(m, "tracker.required_labels", cfg.RequiredLabels)
 	if cfg.TrackerKind == "beads" {
 		cfg.ActiveStates = []string{"open", "in_progress"}
@@ -57,7 +67,10 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 	if v, ok := lookup(m, "pi.approval_policy"); ok {
 		cfg.Pi.Policy = v
 	}
-	cfg.ServerPort = integer(m, "server.port", cfg.ServerPort)
+	if _, ok := lookup(m, "server.port"); ok {
+		cfg.ServerPort = integer(m, "server.port", cfg.ServerPort)
+		cfg.ServerPortSet = true
+	}
 	if p := mapAny(m, "codex.policy"); p != nil {
 		cfg.Codex.Policy = p
 	}
@@ -85,7 +98,7 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 }
 
 func resolveEnvStrings(cfg *Effective) {
-	strings := []*string{&cfg.TrackerEndpoint, &cfg.TrackerAPIKey, &cfg.TrackerProjectSlug, &cfg.TrackerAssignee, &cfg.TrackerBDCommand, &cfg.WorkspaceRoot, &cfg.Codex.Command, &cfg.Pi.Command, &cfg.Pi.Provider, &cfg.Pi.Model}
+	strings := []*string{&cfg.TrackerEndpoint, &cfg.TrackerAPIKey, &cfg.TrackerEmail, &cfg.TrackerProjectKey, &cfg.TrackerProjectSlug, &cfg.TrackerAssignee, &cfg.TrackerBDCommand, &cfg.TrackerJQL, &cfg.WorkspaceRoot, &cfg.Codex.Command, &cfg.Pi.Command, &cfg.Pi.Provider, &cfg.Pi.Model}
 	for _, p := range strings {
 		*p = envRef.ReplaceAllStringFunc(*p, func(s string) string { return os.Getenv(s[1:]) })
 	}

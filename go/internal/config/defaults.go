@@ -15,6 +15,7 @@ func Defaults() Effective {
 		AgentKind:           "codex",
 		TrackerEndpoint:     "https://api.linear.app/graphql",
 		TrackerBDCommand:    "bd",
+		TrackerPageSize:     50,
 		ActiveStates:        []string{"Todo", "In Progress"},
 		TerminalStates:      []string{"Closed", "Cancelled", "Canceled", "Duplicate", "Done"},
 		PollingInterval:     30 * time.Second,

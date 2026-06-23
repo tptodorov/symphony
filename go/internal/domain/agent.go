@@ -1,14 +1,14 @@
 package domain
 
 type TokenUsage struct {
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
 }
 
 type AgentTotals struct {
-	InputTokens    int
-	OutputTokens   int
-	TotalTokens    int
-	SecondsRunning float64
+	InputTokens    int     `json:"input_tokens"`
+	OutputTokens   int     `json:"output_tokens"`
+	TotalTokens    int     `json:"total_tokens"`
+	SecondsRunning float64 `json:"seconds_running"`
 }

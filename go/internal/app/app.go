@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/openai/symphony/go/internal/server"
 	"github.com/openai/symphony/go/internal/tracker"
 	"github.com/openai/symphony/go/internal/tracker/beads"
+	"github.com/openai/symphony/go/internal/tracker/jira"
 	"github.com/openai/symphony/go/internal/tracker/linear"
 	"github.com/openai/symphony/go/internal/workflow"
 	"github.com/openai/symphony/go/internal/workspace"
@@ -27,6 +29,7 @@ type Options struct {
 	WorkflowPath string
 	LogsRoot     string
 	Port         int
+	PortSet      bool
 	Logger       *slog.Logger
 	Tracker      tracker.Tracker
 	Runner       agent.Runner
@@ -66,7 +69,7 @@ func New(ctx context.Context, opt Options) (*App, error) {
 	}
 	wm := workspace.NewManager(cfg.WorkspaceRoot)
 	startupCleanup(ctx, cfg, tr, wm, opt.Logger)
-	o := orchestrator.New(cfg, tr, runner, wm)
+	o := orchestrator.NewWithLogger(cfg, tr, runner, wm, opt.Logger)
 	app := &App{Opt: opt, Orch: o, cfg: cfg}
 	go app.watch(ctx)
 	return app, nil
@@ -75,12 +78,28 @@ func New(ctx context.Context, opt Options) (*App, error) {
 func (a *App) Run(ctx context.Context) error {
 	var srv *http.Server
 	port := a.Opt.Port
-	if port == 0 {
+	portSet := a.Opt.PortSet
+	if !portSet && a.cfg.ServerPortSet {
 		port = a.cfg.ServerPort
+		portSet = true
 	}
-	if port != 0 {
-		srv = &http.Server{Addr: ":" + strconv.Itoa(port), Handler: server.New(a.Orch)}
-		go func() { _ = srv.ListenAndServe() }()
+	if portSet {
+		if port < 0 {
+			return fmt.Errorf("server.port must be non-negative")
+		}
+		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			return fmt.Errorf("start status server: %w", err)
+		}
+		srv = &http.Server{Handler: server.New(a.Orch)}
+		if a.Opt.Logger != nil {
+			a.Opt.Logger.Info("status server starting", "addr", ln.Addr().String())
+		}
+		go func() {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed && a.Opt.Logger != nil {
+				a.Opt.Logger.Error("status server failed", "error", err)
+			}
+		}()
 	}
 	err := a.Orch.Run(ctx)
 	if srv != nil {
@@ -122,6 +141,38 @@ func (a *App) watch(ctx context.Context) {
 	}
 }
 func startupCleanup(ctx context.Context, cfg config.Effective, tr tracker.Tracker, wm workspace.Manager, log *slog.Logger) {
+	if keyFetcher, ok := tr.(interface {
+		FetchStatesByIdentifier(context.Context, []string) (map[string]domain.Issue, error)
+	}); ok {
+		identifiers, err := wm.ListIssueIdentifiers()
+		if err != nil {
+			if log != nil {
+				log.Warn("startup cleanup skipped", "error", err)
+			}
+			return
+		}
+		if log != nil {
+			log.Info("startup cleanup checked existing workspaces", "workspace_count", len(identifiers))
+		}
+		issues, err := keyFetcher.FetchStatesByIdentifier(ctx, identifiers)
+		if err != nil {
+			if log != nil {
+				log.Warn("startup cleanup skipped", "error", err)
+			}
+			return
+		}
+		for identifier, issue := range issues {
+			if containsNorm(cfg.TerminalStates, issue.State) {
+				if log != nil {
+					log.Info("startup cleanup removing terminal workspace", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "state", issue.State)
+				}
+				if err := wm.RemoveForIssue(ctx, identifier, cfg.Hooks.BeforeRemove, cfg.Hooks.Timeout); err != nil && log != nil {
+					log.Warn("workspace cleanup failed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "error", err)
+				}
+			}
+		}
+		return
+	}
 	issues, err := tr.FetchByStates(ctx, cfg.TerminalStates)
 	if err != nil {
 		if log != nil {
@@ -130,10 +181,22 @@ func startupCleanup(ctx context.Context, cfg config.Effective, tr tracker.Tracke
 		return
 	}
 	for _, issue := range issues {
+		if log != nil {
+			log.Info("startup cleanup removing terminal workspace", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "state", issue.State)
+		}
 		if err := wm.RemoveForIssue(ctx, issue.Identifier, cfg.Hooks.BeforeRemove, cfg.Hooks.Timeout); err != nil && log != nil {
 			log.Warn("workspace cleanup failed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "error", err)
 		}
 	}
+}
+
+func containsNorm(values []string, state string) bool {
+	for _, value := range values {
+		if domain.NormalizeState(value) == domain.NormalizeState(state) {
+			return true
+		}
+	}
+	return false
 }
 
 func newTracker(cfg config.Effective) (tracker.Tracker, error) {
@@ -142,6 +205,8 @@ func newTracker(cfg config.Effective) (tracker.Tracker, error) {
 		return linear.New(cfg.TrackerEndpoint, cfg.TrackerAPIKey, cfg.TrackerProjectSlug), nil
 	case "beads":
 		return &beads.Tracker{Command: cfg.TrackerBDCommand, WorkDir: cfg.WorkflowDir}, nil
+	case "jira":
+		return jira.New(cfg.TrackerEndpoint, cfg.TrackerEmail, cfg.TrackerAPIKey, cfg.TrackerProjectKey, cfg.TrackerJQL, cfg.TrackerPageSize), nil
 	default:
 		return nil, fmt.Errorf("unsupported tracker.kind %q", cfg.TrackerKind)
 	}

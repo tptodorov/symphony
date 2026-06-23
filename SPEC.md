@@ -296,8 +296,12 @@ Fields:
 
 Workflow file path precedence:
 
-1. Explicit application/runtime setting (set by CLI startup path).
-2. Default: `WORKFLOW.md` in the current process working directory.
+1. Explicit application/runtime setting (set by the CLI positional workflow path).
+2. Default: `WORKFLOW.md` in the effective Symphony working directory.
+
+The effective Symphony working directory defaults to the current process working directory.
+The CLI MAY accept an explicit startup working directory. When provided, the runtime applies it
+before resolving the default workflow path or any relative positional workflow path.
 
 Loader behavior:
 
@@ -598,7 +602,8 @@ Dispatch gating behavior:
 
 Configuration is resolved in this order:
 
-1. Select the workflow file path (explicit runtime setting, otherwise cwd default).
+1. Select the workflow file path (explicit runtime path, otherwise effective working directory
+   default).
 2. Parse YAML front matter into a raw config map.
 3. Apply built-in defaults for missing OPTIONAL fields.
 4. Resolve `$VAR_NAME` indirection only for config values that explicitly contain `$VAR_NAME`.
@@ -2636,8 +2641,14 @@ If `tracker.kind == "beads"` is implemented:
 ### 17.9 CLI and Host Lifecycle
 
 - CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
-- CLI uses `./WORKFLOW.md` when no workflow path argument is provided
+- CLI accepts an OPTIONAL startup working directory argument (`-workdir <path>`)
+- CLI applies `-workdir` before resolving the default workflow path or a relative positional
+  workflow path
+- CLI uses `./WORKFLOW.md` in the effective working directory when no workflow path argument is
+  provided
+- CLI help shows the positional workflow path form (`[path-to-WORKFLOW.md]`)
 - CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
+- CLI errors when the explicit startup working directory cannot be used
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
