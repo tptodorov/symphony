@@ -36,6 +36,18 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	if req.Workspace == "" {
 		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("workspace path is required")}
 	}
+	runLogs, err := agent.OpenRunLogs(req.Logs)
+	if err != nil {
+		return agent.Result{SessionID: req.SessionID, Logs: req.Logs, Err: fmt.Errorf("open agent logs: %w", err)}
+	}
+	defer runLogs.Close()
+	finish := func(res agent.Result) agent.Result {
+		if res.Logs.Protocol == "" && res.Logs.Stderr == "" && res.Logs.Result == "" {
+			res.Logs = req.Logs
+		}
+		runLogs.WriteResult(res)
+		return res
+	}
 	if req.TurnTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, req.TurnTimeout)
@@ -46,35 +58,35 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("open pi stdin: %w", err)}
+		return finish(agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("open pi stdin: %w", err)})
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("open pi stdout: %w", err)}
+		return finish(agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("open pi stdout: %w", err)})
 	}
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.Stderr = runLogs.StderrWriter(&stderr)
 	if err := cmd.Start(); err != nil {
-		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("start pi: %w", err)}
+		return finish(agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("start pi: %w", err)})
 	}
 	sessionID := derivePISessionID(req.SessionID, cmd)
-	if err := writeJSON(stdin, map[string]any{"id": req.SessionID, "type": "prompt", "message": req.Prompt}); err != nil {
+	if err := writeLoggedJSON(stdin, runLogs, map[string]any{"id": req.SessionID, "type": "prompt", "message": req.Prompt}); err != nil {
 		_ = cmd.Process.Kill()
-		return agent.Result{SessionID: sessionID, Err: fmt.Errorf("send pi prompt: %w", err)}
+		return finish(agent.Result{SessionID: sessionID, Err: fmt.Errorf("send pi prompt: %w", err)})
 	}
 
-	completed, err := r.read(stdout, events, req, stdin, sessionID)
+	completed, err := r.read(stdout, events, req, stdin, sessionID, runLogs)
 	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
-		return agent.Result{SessionID: sessionID, Err: ctx.Err()}
+		return finish(agent.Result{SessionID: sessionID, Err: ctx.Err()})
 	}
 	if err != nil {
-		return agent.Result{SessionID: sessionID, Err: err}
+		return finish(agent.Result{SessionID: sessionID, Err: err})
 	}
 	if waitErr != nil {
-		return agent.Result{SessionID: sessionID, Err: fmt.Errorf("pi exited: %w: %s", waitErr, stderr.String())}
+		return finish(agent.Result{SessionID: sessionID, Err: fmt.Errorf("pi exited: %w: %s", waitErr, stderr.String())})
 	}
-	return agent.Result{SessionID: sessionID, Completed: completed}
+	return finish(agent.Result{SessionID: sessionID, Completed: completed})
 }
 
 func derivePISessionID(reqSessionID string, cmd *exec.Cmd) string {
@@ -84,16 +96,17 @@ func derivePISessionID(reqSessionID string, cmd *exec.Cmd) string {
 	return reqSessionID
 }
 
-func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.RunRequest, stdin io.WriteCloser, sessionID string) (bool, error) {
+func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.RunRequest, stdin io.WriteCloser, sessionID string, runLogs *agent.RunLogs) (bool, error) {
 	s := bufio.NewScanner(stdout)
 	s.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	completed := false
 	accepted := false
 	for s.Scan() {
 		line := s.Text()
+		runLogs.WriteProtocol("recv", []byte(line))
 		var msg map[string]any
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			events <- agent.Event{SessionID: sessionID, IssueID: req.Issue.ID, Type: "pi_output", Message: line, At: time.Now()}
+			events <- agent.Event{SessionID: sessionID, IssueID: req.Issue.ID, Type: "pi_output", Message: line, Text: piText(map[string]any{"message": line}), At: time.Now()}
 			continue
 		}
 		typeName, _ := msg["type"].(string)
@@ -104,16 +117,16 @@ func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.Run
 			accepted = true
 		}
 		if typeName == "extension_ui_request" {
-			_ = respondExtensionUI(stdin, msg, req.Policy)
+			_ = respondExtensionUI(stdin, runLogs, msg, req.Policy)
 		}
 		if typeName == "tool_request" {
-			_ = handleToolRequest(stdin, msg, req)
+			_ = handleToolRequest(stdin, runLogs, msg, req)
 		}
 		if typeName == "agent_end" {
 			completed = true
 			_ = stdin.Close()
 		}
-		events <- agent.Event{SessionID: sessionID, IssueID: req.Issue.ID, Type: typeName, Message: line, Usage: extractPIUsage(msg), RateLimits: extractPIRateLimits(msg), At: time.Now()}
+		events <- agent.Event{SessionID: sessionID, IssueID: req.Issue.ID, Type: typeName, Message: line, Text: piText(msg), Usage: extractPIUsage(msg), RateLimits: extractPIRateLimits(msg), At: time.Now()}
 	}
 	if err := s.Err(); err != nil {
 		return completed, fmt.Errorf("read pi output: %w", err)
@@ -124,9 +137,9 @@ func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.Run
 	return completed, nil
 }
 
-func handleToolRequest(w io.Writer, msg map[string]any, req agent.RunRequest) error {
+func handleToolRequest(w io.Writer, logs *agent.RunLogs, msg map[string]any, req agent.RunRequest) error {
 	if req.Policy != nil && isStrictPolicy(req.Policy) {
-		return writeJSON(w, map[string]any{"type": "tool_result", "id": msg["id"], "success": false, "error": "tool calls disabled by policy"})
+		return writeLoggedJSON(w, logs, map[string]any{"type": "tool_result", "id": msg["id"], "success": false, "error": "tool calls disabled by policy"})
 	}
 	id, _ := msg["id"].(string)
 	method, _ := msg["method"].(string)
@@ -151,7 +164,7 @@ func handleToolRequest(w io.Writer, msg map[string]any, req agent.RunRequest) er
 	} else {
 		resp["result"] = result.ParsedJSON
 	}
-	return writeJSON(w, resp)
+	return writeLoggedJSON(w, logs, resp)
 }
 
 func parseStringArray(v any) []string {
@@ -183,17 +196,17 @@ func asInt(v any) int {
 func extractPIUsage(msg map[string]any) domain.TokenUsage {
 	if usage, ok := msg["usage"].(map[string]any); ok {
 		return domain.TokenUsage{
-			InputTokens: asInt(usage["input_tokens"]),
+			InputTokens:  asInt(usage["input_tokens"]),
 			OutputTokens: asInt(usage["output_tokens"]),
-			TotalTokens: asInt(usage["total_tokens"]),
+			TotalTokens:  asInt(usage["total_tokens"]),
 		}
 	}
 	if session, ok := msg["session"].(map[string]any); ok {
 		if usage, ok := session["usage"].(map[string]any); ok {
 			return domain.TokenUsage{
-				InputTokens: asInt(usage["input_tokens"]),
+				InputTokens:  asInt(usage["input_tokens"]),
 				OutputTokens: asInt(usage["output_tokens"]),
-				TotalTokens: asInt(usage["total_tokens"]),
+				TotalTokens:  asInt(usage["total_tokens"]),
 			}
 		}
 	}
@@ -220,18 +233,32 @@ func extractPIRateLimits(msg map[string]any) map[string]any {
 	return nil
 }
 
-func respondExtensionUI(w io.Writer, msg map[string]any, policy any) error {
+func piText(msg map[string]any) string {
+	for _, key := range []string{"text", "message", "delta"} {
+		if text, ok := msg[key].(string); ok {
+			return text
+		}
+	}
+	if item, ok := msg["item"].(map[string]any); ok {
+		if text, ok := item["text"].(string); ok {
+			return text
+		}
+	}
+	return ""
+}
+
+func respondExtensionUI(w io.Writer, logs *agent.RunLogs, msg map[string]any, policy any) error {
 	method, _ := msg["method"].(string)
 	id, _ := msg["id"].(string)
 	if id == "" {
 		return nil
 	}
 	if isStrictPolicy(policy) {
-		return writeJSON(w, map[string]any{"type": "extension_ui_response", "id": id, "cancelled": true, "error": "extension UI dialogs are disabled by approval_policy"})
+		return writeLoggedJSON(w, logs, map[string]any{"type": "extension_ui_response", "id": id, "cancelled": true, "error": "extension UI dialogs are disabled by approval_policy"})
 	}
 	switch method {
 	case "confirm", "select", "input", "editor":
-		return writeJSON(w, map[string]any{"type": "extension_ui_response", "id": id, "cancelled": true})
+		return writeLoggedJSON(w, logs, map[string]any{"type": "extension_ui_response", "id": id, "cancelled": true})
 	}
 	return nil
 }
@@ -256,6 +283,17 @@ func writeJSON(w io.Writer, v any) error {
 	if err != nil {
 		return err
 	}
+	b = append(b, '\n')
+	_, err = w.Write(b)
+	return err
+}
+
+func writeLoggedJSON(w io.Writer, logs *agent.RunLogs, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	logs.WriteProtocol("send", b)
 	b = append(b, '\n')
 	_, err = w.Write(b)
 	return err

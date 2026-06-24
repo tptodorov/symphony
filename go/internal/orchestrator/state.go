@@ -15,6 +15,8 @@ type running struct {
 	status, lastEventType    string
 	lastMessage              string
 	error                    *string
+	logs                     domain.RunLogPaths
+	agentTextTail            []AgentTextMessage
 	turnCount                int
 	agentInputTokens         int
 	agentOutputTokens        int

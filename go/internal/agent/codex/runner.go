@@ -55,6 +55,7 @@ type appServerClient struct {
 	req         agent.RunRequest
 	events      chan<- agent.Event
 	readTimeout time.Duration
+	logs        *agent.RunLogs
 
 	mu        sync.Mutex
 	nextID    int
@@ -94,22 +95,32 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	if readTimeout == 0 {
 		readTimeout = defaultReadTimeout
 	}
+	runLogs, err := agent.OpenRunLogs(req.Logs)
+	if err != nil {
+		return agent.Result{SessionID: req.SessionID, Logs: req.Logs, Err: fmt.Errorf("open agent logs: %w", err)}
+	}
+	defer runLogs.Close()
+	finish := func(err error) agent.Result {
+		res := agent.Result{SessionID: req.SessionID, Logs: req.Logs, Err: err}
+		runLogs.WriteResult(res)
+		return res
+	}
 
 	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
 	cmd.Dir = req.Workspace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("open stdin: %w", err)}
+		return finish(fmt.Errorf("open stdin: %w", err))
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("open stdout: %w", err)}
+		return finish(fmt.Errorf("open stdout: %w", err))
 	}
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.Stderr = runLogs.StderrWriter(&stderr)
 	if err := cmd.Start(); err != nil {
-		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("start codex: %w", err)}
+		return finish(fmt.Errorf("start codex: %w", err))
 	}
 
 	client := &appServerClient{
@@ -118,6 +129,7 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 		req:         req,
 		events:      events,
 		readTimeout: readTimeout,
+		logs:        runLogs,
 		nextID:      1,
 		pending:     map[string]chan rpcMessage{},
 		sessionID:   req.SessionID,
@@ -322,6 +334,7 @@ func (c *appServerClient) send(message any) error {
 		return err
 	}
 	b = append(b, '\n')
+	c.logs.WriteProtocol("send", bytes.TrimSuffix(b, []byte{'\n'}))
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, err := c.stdin.Write(b); err != nil {
@@ -335,9 +348,10 @@ func (c *appServerClient) scan(stdout io.Reader) {
 	s.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	for s.Scan() {
 		line := s.Text()
+		c.logs.WriteProtocol("recv", []byte(line))
 		var msg rpcMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			c.emit("malformed_message", line, domain.TokenUsage{}, nil)
+			c.emit("malformed_message", line, "", "", domain.TokenUsage{}, nil)
 			continue
 		}
 		if len(msg.ID) > 0 && msg.Method == "" {
@@ -362,8 +376,9 @@ func (c *appServerClient) handleMessage(msg rpcMessage, line string) {
 	if method != "turn/completed" {
 		c.updateSessionFromParams(msg.Params)
 	}
+	text, itemID := agentText(method, msg.Params)
 	if len(msg.ID) > 0 {
-		c.emit(c.eventType(method, msg.Params), line, ExtractUsage([]byte(line)), ExtractRateLimits([]byte(line)))
+		c.emit(c.eventType(method, msg.Params), line, text, itemID, ExtractUsage([]byte(line)), ExtractRateLimits([]byte(line)))
 		go c.respondToServerRequest(msg)
 		return
 	}
@@ -373,7 +388,7 @@ func (c *appServerClient) handleMessage(msg rpcMessage, line string) {
 		c.usage = usage
 		c.mu.Unlock()
 	}
-	c.emit(c.eventType(method, msg.Params), line, usage, ExtractRateLimits([]byte(line)))
+	c.emit(c.eventType(method, msg.Params), line, text, itemID, usage, ExtractRateLimits([]byte(line)))
 	if method == "turn/completed" {
 		c.finishTurn(c.turnCompletion(msg.Params))
 	}
@@ -551,7 +566,58 @@ func (c *appServerClient) eventType(method string, params json.RawMessage) strin
 	}
 }
 
-func (c *appServerClient) emit(typeName, message string, usage domain.TokenUsage, rateLimits map[string]any) {
+func agentText(method string, params json.RawMessage) (string, string) {
+	var root map[string]any
+	if err := json.Unmarshal(params, &root); err != nil {
+		return "", ""
+	}
+	itemID := strValue(root["itemId"])
+	if method == "item/completed" {
+		item, _ := root["item"].(map[string]any)
+		if item == nil || strValue(item["type"]) != "agentMessage" {
+			return "", ""
+		}
+		itemID = strValue(item["id"])
+		if text, ok := item["text"].(string); ok {
+			return truncateAgentText(text), itemID
+		}
+		if content, ok := item["content"].(string); ok {
+			return truncateAgentText(content), itemID
+		}
+		return "", itemID
+	}
+	if !strings.Contains(method, "agentMessage") && !strings.Contains(method, "assistant") {
+		return "", ""
+	}
+	if item, ok := root["item"].(map[string]any); ok {
+		if itemID == "" {
+			itemID = strValue(item["id"])
+		}
+		if text, ok := item["text"].(string); ok {
+			return truncateAgentText(text), itemID
+		}
+		if content, ok := item["content"].(string); ok {
+			return truncateAgentText(content), itemID
+		}
+	}
+	if text, ok := root["text"].(string); ok {
+		return truncateAgentText(text), itemID
+	}
+	if delta, ok := root["delta"].(string); ok {
+		return truncateAgentText(delta), itemID
+	}
+	return "", itemID
+}
+
+func truncateAgentText(text string) string {
+	const max = 4000
+	if len(text) <= max {
+		return text
+	}
+	return text[:max]
+}
+
+func (c *appServerClient) emit(typeName, message, text, itemID string, usage domain.TokenUsage, rateLimits map[string]any) {
 	if usage.TotalTokens != 0 {
 		c.mu.Lock()
 		c.usage = usage
@@ -559,7 +625,7 @@ func (c *appServerClient) emit(typeName, message string, usage domain.TokenUsage
 	}
 	sessionID, threadID, turnID := c.currentIdentity()
 	select {
-	case c.events <- agent.Event{SessionID: sessionID, ThreadID: threadID, TurnID: turnID, IssueID: c.req.Issue.ID, Type: typeName, Message: message, Usage: usage, RateLimits: rateLimits, At: time.Now()}:
+	case c.events <- agent.Event{SessionID: sessionID, ThreadID: threadID, TurnID: turnID, IssueID: c.req.Issue.ID, ItemID: itemID, Type: typeName, Message: message, Text: text, Usage: usage, RateLimits: rateLimits, At: time.Now()}:
 	case <-c.ctx.Done():
 	}
 }
@@ -567,14 +633,17 @@ func (c *appServerClient) emit(typeName, message string, usage domain.TokenUsage
 func (c *appServerClient) result(err error, completed bool) agent.Result {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return agent.Result{
+	res := agent.Result{
 		SessionID: c.sessionID,
 		ThreadID:  c.threadID,
 		TurnID:    c.turnID,
 		Usage:     c.usage,
+		Logs:      c.req.Logs,
 		Err:       err,
 		Completed: completed,
 	}
+	c.logs.WriteResult(res)
+	return res
 }
 
 func (c *appServerClient) setTurn(threadID, turnID string) {
@@ -635,7 +704,7 @@ func (c *appServerClient) setObservedIDs(threadID, turnID string) {
 	}
 	c.mu.Unlock()
 	if started {
-		c.emit("session_started", "turn started", domain.TokenUsage{}, nil)
+		c.emit("session_started", "turn started", "", "", domain.TokenUsage{}, nil)
 	}
 }
 

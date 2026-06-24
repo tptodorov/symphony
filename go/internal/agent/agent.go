@@ -23,6 +23,7 @@ type RunRequest struct {
 	TrackerBDCommand    string
 	TrackerEndpoint     string
 	TrackerAPIKey       string
+	Logs                domain.RunLogPaths
 }
 
 type Event struct {
@@ -30,8 +31,10 @@ type Event struct {
 	ThreadID   string
 	TurnID     string
 	IssueID    string
+	ItemID     string
 	Type       string
 	Message    string
+	Text       string
 	Usage      domain.TokenUsage
 	RateLimits map[string]any
 	At         time.Time
@@ -42,6 +45,7 @@ type Result struct {
 	ThreadID  string
 	TurnID    string
 	Usage     domain.TokenUsage
+	Logs      domain.RunLogPaths
 	Err       error
 	Completed bool
 }

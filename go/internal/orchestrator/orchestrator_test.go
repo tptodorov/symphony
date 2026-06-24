@@ -108,6 +108,85 @@ func TestForwardEventsDoesNotDoubleCountAcrossNonUsageEvents(t *testing.T) {
 	}
 }
 
+func TestRunningSnapshotIncludesLogsAndAgentTextTail(t *testing.T) {
+	cfg := config.Defaults()
+	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
+	started := time.Now()
+	logs := domain.RunLogPaths{Protocol: filepath.Join(t.TempDir(), "protocol.jsonl"), Stderr: filepath.Join(t.TempDir(), "stderr.log"), Result: filepath.Join(t.TempDir(), "result.json")}
+	o.mu.Lock()
+	o.running["1"] = running{
+		issue:         domain.Issue{ID: "1", Identifier: "A-1", Title: "T", State: "Todo"},
+		sessionID:     "A-1-dispatch",
+		workspace:     filepath.Join(t.TempDir(), "A-1"),
+		started:       started,
+		lastEvent:     started,
+		status:        "running",
+		lastEventType: "session_started",
+		logs:          logs,
+	}
+	o.mu.Unlock()
+
+	events := make(chan agent.Event, 105)
+	for i := 0; i < 105; i++ {
+		events <- agent.Event{IssueID: "1", Type: "item_agentMessage_updated", Text: "x", At: time.Now()}
+	}
+	close(events)
+
+	o.forwardEvents(events)
+
+	sn := o.Snapshot()
+	if len(sn.Running) != 1 {
+		t.Fatalf("running count = %d", len(sn.Running))
+	}
+	running := sn.Running[0]
+	if running.LogPath != logs.Protocol || running.Logs == nil || len(running.Logs.CodexSessionLogs) != 3 {
+		t.Fatalf("logs missing from running snapshot: %+v", running)
+	}
+	if len(running.RecentAgentMessages) != 100 {
+		t.Fatalf("tail length = %d", len(running.RecentAgentMessages))
+	}
+}
+
+func TestAgentTextTailUsesCodexItemBoundaries(t *testing.T) {
+	cfg := config.Defaults()
+	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
+	started := time.Now()
+	o.mu.Lock()
+	o.running["1"] = running{
+		issue:         domain.Issue{ID: "1", Identifier: "A-1", Title: "T", State: "Todo"},
+		sessionID:     "A-1-dispatch",
+		workspace:     filepath.Join(t.TempDir(), "A-1"),
+		started:       started,
+		lastEvent:     started,
+		status:        "running",
+		lastEventType: "session_started",
+	}
+	o.mu.Unlock()
+
+	events := make(chan agent.Event, 6)
+	events <- agent.Event{IssueID: "1", ItemID: "msg-1", Type: "item_agentMessage_delta", Text: "First ", At: time.Now()}
+	events <- agent.Event{IssueID: "1", ItemID: "msg-1", Type: "item_agentMessage_delta", Text: "message", At: time.Now()}
+	events <- agent.Event{IssueID: "1", ItemID: "msg-1", Type: "item_completed", Text: "First message", At: time.Now()}
+	events <- agent.Event{IssueID: "1", Type: "thread_tokenUsage_updated", Usage: domain.TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}, At: time.Now()}
+	events <- agent.Event{IssueID: "1", ItemID: "msg-2", Type: "item_agentMessage_delta", Text: "Second", At: time.Now()}
+	events <- agent.Event{IssueID: "1", ItemID: "msg-2", Type: "item_completed", Text: "Second message", At: time.Now()}
+	close(events)
+
+	o.forwardEvents(events)
+
+	sn := o.Snapshot()
+	if len(sn.Running) != 1 {
+		t.Fatalf("running count = %d", len(sn.Running))
+	}
+	got := sn.Running[0].RecentAgentMessages
+	if len(got) != 2 {
+		t.Fatalf("tail length = %d, tail=%+v", len(got), got)
+	}
+	if got[0].Text != "First message" || got[1].Text != "Second message" {
+		t.Fatalf("tail text = %+v", got)
+	}
+}
+
 func TestBackoff(t *testing.T) {
 	if got := backoff(3, 30*time.Second); got != 30*time.Second {
 		t.Fatal(got)

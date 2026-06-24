@@ -24,4 +24,5 @@ type RunAttempt struct {
 	StartedAt       time.Time
 	Status          RunAttemptStatus
 	Error           *string
+	Logs            RunLogPaths
 }

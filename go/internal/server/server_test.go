@@ -145,7 +145,7 @@ func TestDashboardUsesStateAPI(t *testing.T) {
 		t.Fatal(rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "Running sessions") || !strings.Contains(body, "/api/v1/state") {
+	if !strings.Contains(body, "Running Sessions") || !strings.Contains(body, "/api/v1/state") || !strings.Contains(body, "recent_agent_messages") || !strings.Contains(body, "log_path") || !strings.Contains(body, "chat-bubble") || !strings.Contains(body, "renderChatText") || !strings.Contains(body, "scrollTailLogs") {
 		t.Fatalf("dashboard does not render status surface: %s", body)
 	}
 }

@@ -2124,6 +2124,15 @@ Enablement (extension):
 - Host a human-readable dashboard at `/`.
 - The returned document SHOULD depict the current state of the system (for example active sessions,
   retry delays, token consumption, runtime totals, recent events, and health/error indicators).
+- The dashboard SHOULD include a Running Sessions section for currently running jobs.
+  - Each running job SHOULD expose the primary raw agent log path when available.
+  - Each running job SHOULD show a bounded tail of recent agent text messages so an operator can
+    understand what the agent is currently doing without opening raw logs.
+  - The text tail SHOULD prefer human-readable agent text extracted from agent protocol events and
+    SHOULD avoid showing raw JSON-RPC payloads.
+  - The text tail SHOULD include at most 100 messages per running job.
+  - The dashboard SHOULD refresh this section automatically; short polling of the JSON API is
+    sufficient and streaming transport is not required.
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.
 
@@ -2155,8 +2164,16 @@ Minimum endpoints:
           "turn_count": 7,
           "last_event": "turn_completed",
           "last_message": "",
+          "log_path": "/var/log/symphony/agents/MT-649/thread-1-turn-1/protocol.jsonl",
           "started_at": "2026-02-24T20:10:12Z",
           "last_event_at": "2026-02-24T20:14:59Z",
+          "recent_agent_messages": [
+            {
+              "at": "2026-02-24T20:14:45Z",
+              "event": "item_agentMessage_delta",
+              "text": "I am checking the failing test output."
+            }
+          ],
           "tokens": {
             "input_tokens": 1200,
             "output_tokens": 800,
@@ -2219,12 +2236,19 @@ Minimum endpoints:
       "logs": {
         "codex_session_logs": [
           {
-            "label": "latest",
-            "path": "/var/log/symphony/codex/MT-649/latest.log",
+            "label": "protocol",
+            "path": "/var/log/symphony/agents/MT-649/thread-1-turn-1/protocol.jsonl",
             "url": null
           }
         ]
       },
+      "recent_agent_messages": [
+        {
+          "at": "2026-02-24T20:14:45Z",
+          "event": "item_agentMessage_delta",
+          "text": "I am checking the failing test output."
+        }
+      ],
       "recent_events": [
         {
           "at": "2026-02-24T20:14:59Z",
@@ -2264,6 +2288,23 @@ API design notes:
 - API errors SHOULD use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it SHOULD consume this API rather than duplicating state
   logic.
+
+Agent run logs:
+
+- When file logging is configured, each agent run SHOULD write raw protocol and diagnostic logs under
+  the configured logs root.
+- A conforming layout is:
+  - `agents/<issue_identifier>/<session_id>/protocol.jsonl`
+  - `agents/<issue_identifier>/<session_id>/stderr.log`
+  - `agents/<issue_identifier>/<session_id>/result.json`
+- `protocol.jsonl` SHOULD preserve raw agent protocol lines with enough direction metadata to tell
+  messages sent by Symphony from messages received from the agent.
+- `stderr.log` SHOULD contain coding-agent diagnostic stderr.
+- `result.json` SHOULD contain the final run result, including terminal status, error text when
+  present, session/thread/turn identity, and token totals when available.
+- Log paths SHOULD be exposed through the JSON API and dashboard when available.
+- Agent logs are observability artifacts. They MUST NOT be required for orchestrator correctness,
+  retry scheduling, reconciliation, or tracker state updates.
 
 ## 14. Failure Model and Recovery Strategy
 

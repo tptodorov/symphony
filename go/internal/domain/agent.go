@@ -12,3 +12,9 @@ type AgentTotals struct {
 	TotalTokens    int     `json:"total_tokens"`
 	SecondsRunning float64 `json:"seconds_running"`
 }
+
+type RunLogPaths struct {
+	Protocol string `json:"protocol,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	Result   string `json:"result,omitempty"`
+}

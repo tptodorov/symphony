@@ -70,6 +70,7 @@ func New(ctx context.Context, opt Options) (*App, error) {
 	wm := workspace.NewManager(cfg.WorkspaceRoot)
 	startupCleanup(ctx, cfg, tr, wm, opt.Logger)
 	o := orchestrator.NewWithLogger(cfg, tr, runner, wm, opt.Logger)
+	o.SetLogsRoot(opt.LogsRoot)
 	app := &App{Opt: opt, Orch: o, cfg: cfg}
 	go app.watch(ctx)
 	return app, nil

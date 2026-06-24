@@ -16,23 +16,26 @@ type Snapshot struct {
 	RateLimits  map[string]any      `json:"rate_limits,omitempty"`
 }
 type RunningSnapshot struct {
-	IssueID         string             `json:"issue_id,omitempty"`
-	IssueIdentifier string             `json:"issue_identifier,omitempty"`
-	IssueURL        *string            `json:"issue_url,omitempty"`
-	SessionID       string             `json:"session_id,omitempty"`
-	ThreadID        string             `json:"thread_id,omitempty"`
-	TurnID          string             `json:"turn_id,omitempty"`
-	TurnCount       int                `json:"turn_count,omitempty"`
-	State           string             `json:"state,omitempty"`
-	Status          string             `json:"status,omitempty"`
-	LastEvent       string             `json:"last_event,omitempty"`
-	LastMessage     string             `json:"last_message,omitempty"`
-	Error           string             `json:"error,omitempty"`
-	Workspace       string             `json:"workspace,omitempty"`
-	StartedAt       *time.Time         `json:"started_at,omitempty"`
-	LastEventAt     *time.Time         `json:"last_event_at,omitempty"`
-	Tokens          *domain.TokenUsage `json:"tokens,omitempty"`
-	Attempts        *AttemptsSnapshot  `json:"attempts,omitempty"`
+	IssueID             string             `json:"issue_id,omitempty"`
+	IssueIdentifier     string             `json:"issue_identifier,omitempty"`
+	IssueURL            *string            `json:"issue_url,omitempty"`
+	SessionID           string             `json:"session_id,omitempty"`
+	ThreadID            string             `json:"thread_id,omitempty"`
+	TurnID              string             `json:"turn_id,omitempty"`
+	TurnCount           int                `json:"turn_count,omitempty"`
+	State               string             `json:"state,omitempty"`
+	Status              string             `json:"status,omitempty"`
+	LastEvent           string             `json:"last_event,omitempty"`
+	LastMessage         string             `json:"last_message,omitempty"`
+	LogPath             string             `json:"log_path,omitempty"`
+	Logs                *LogsSnapshot      `json:"logs,omitempty"`
+	RecentAgentMessages []AgentTextMessage `json:"recent_agent_messages,omitempty"`
+	Error               string             `json:"error,omitempty"`
+	Workspace           string             `json:"workspace,omitempty"`
+	StartedAt           *time.Time         `json:"started_at,omitempty"`
+	LastEventAt         *time.Time         `json:"last_event_at,omitempty"`
+	Tokens              *domain.TokenUsage `json:"tokens,omitempty"`
+	Attempts            *AttemptsSnapshot  `json:"attempts,omitempty"`
 }
 type AttemptsSnapshot struct {
 	RestartCount        int `json:"restart_count,omitempty"`
@@ -49,17 +52,18 @@ type RetrySnapshot struct {
 }
 
 type IssueDetailSnapshot struct {
-	IssueIdentifier string             `json:"issue_identifier"`
-	IssueID         string             `json:"issue_id"`
-	Status          string             `json:"status"`
-	Workspace       *WorkspaceSnapshot `json:"workspace"`
-	Attempts        AttemptsSnapshot   `json:"attempts"`
-	Running         *RunningSnapshot   `json:"running"`
-	Retry           *RetrySnapshot     `json:"retry"`
-	Logs            LogsSnapshot       `json:"logs"`
-	RecentEvents    []EventSnapshot    `json:"recent_events"`
-	LastError       *string            `json:"last_error"`
-	Tracked         map[string]any     `json:"tracked"`
+	IssueIdentifier     string             `json:"issue_identifier"`
+	IssueID             string             `json:"issue_id"`
+	Status              string             `json:"status"`
+	Workspace           *WorkspaceSnapshot `json:"workspace"`
+	Attempts            AttemptsSnapshot   `json:"attempts"`
+	Running             *RunningSnapshot   `json:"running"`
+	Retry               *RetrySnapshot     `json:"retry"`
+	Logs                LogsSnapshot       `json:"logs"`
+	RecentAgentMessages []AgentTextMessage `json:"recent_agent_messages,omitempty"`
+	RecentEvents        []EventSnapshot    `json:"recent_events"`
+	LastError           *string            `json:"last_error"`
+	Tracked             map[string]any     `json:"tracked"`
 }
 
 type WorkspaceSnapshot struct {
@@ -80,4 +84,11 @@ type EventSnapshot struct {
 	At      time.Time `json:"at"`
 	Event   string    `json:"event"`
 	Message string    `json:"message,omitempty"`
+}
+
+type AgentTextMessage struct {
+	At     time.Time `json:"at"`
+	Event  string    `json:"event"`
+	Text   string    `json:"text"`
+	itemID string
 }

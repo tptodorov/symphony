@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -34,6 +36,7 @@ type Orchestrator struct {
 	rateLimits map[string]any
 	runHistory map[string][]domain.RunAttempt
 	log        *slog.Logger
+	logsRoot   string
 }
 
 func New(cfg config.Effective, tr tracker.Tracker, runner agent.Runner, wm workspace.Manager) *Orchestrator {
@@ -45,6 +48,12 @@ func NewWithLogger(cfg config.Effective, tr tracker.Tracker, runner agent.Runner
 }
 
 func (o *Orchestrator) UpdateConfig(cfg config.Effective) { o.mu.Lock(); o.cfg = cfg; o.mu.Unlock() }
+
+func (o *Orchestrator) SetLogsRoot(root string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.logsRoot = root
+}
 
 func (o *Orchestrator) Run(ctx context.Context) error {
 	o.mu.Lock()
@@ -178,23 +187,28 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 		p = fmt.Sprintf("%s: %s\n\n%s", issue.Identifier, issue.Title, p)
 	}
 	sessionID := fmt.Sprintf("%s-%d", domain.SanitizeWorkspaceKey(issue.Identifier), time.Now().UnixNano())
+	logs := o.prepareRunLogs(issue.Identifier, sessionID)
 	rctx, cancel := context.WithCancel(ctx)
 	o.mu.Lock()
 	runStarted := time.Now()
-	o.running[issue.ID] = running{issue: issue, sessionID: sessionID, workspace: ws.Path, started: runStarted, lastEvent: runStarted, status: "running", lastEventType: "session_started", cancel: cancel}
+	o.running[issue.ID] = running{issue: issue, sessionID: sessionID, workspace: ws.Path, started: runStarted, lastEvent: runStarted, status: "running", lastEventType: "session_started", logs: logs, cancel: cancel}
+	o.updateAttemptLogsLocked(issue.ID, attempt, logs)
 	delete(o.claimed, issue.ID)
 	delete(o.cancelled, issue.ID)
 	o.mu.Unlock()
 	if o.log != nil {
 		observability.Dispatch(o.log, issue.ID, issue.Identifier, sessionID)
 		observability.WorkerStart(o.log, issue.ID, issue.Identifier, sessionID)
+		if logs.Protocol != "" || logs.Stderr != "" || logs.Result != "" {
+			o.log.Info("agent logs prepared", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "session_id", sessionID, "protocol_log", logs.Protocol, "stderr_log", logs.Stderr, "result_log", logs.Result)
+		}
 	}
 	ch := make(chan agent.Event, 32)
 	go o.forwardEvents(ch)
 	o.updateAttempt(issue.ID, issue.Identifier, attempt, ws.Path, string(domain.RunAttemptStreaming), nil)
 	go func() {
 		start := time.Now()
-		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), ReadTimeout: agentReadTimeout(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL, TrackerBDCommand: cfg.TrackerBDCommand, TrackerEndpoint: cfg.TrackerEndpoint, TrackerAPIKey: cfg.TrackerAPIKey}, ch)
+		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), ReadTimeout: agentReadTimeout(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL, TrackerBDCommand: cfg.TrackerBDCommand, TrackerEndpoint: cfg.TrackerEndpoint, TrackerAPIKey: cfg.TrackerAPIKey, Logs: logs}, ch)
 		close(ch)
 		if cfg.Hooks.AfterRun != "" {
 			_ = workspace.RunHook(context.Background(), cfg.Hooks.AfterRun, ws.Path, cfg.Hooks.Timeout)
@@ -244,6 +258,27 @@ func agentPolicy(cfg config.Effective) any {
 		return cfg.Pi.Policy
 	}
 	return cfg.Codex.Policy
+}
+
+func (o *Orchestrator) prepareRunLogs(identifier, sessionID string) domain.RunLogPaths {
+	o.mu.Lock()
+	root := o.logsRoot
+	o.mu.Unlock()
+	if root == "" {
+		return domain.RunLogPaths{}
+	}
+	dir := filepath.Join(root, "agents", domain.SanitizeWorkspaceKey(identifier), domain.SanitizeWorkspaceKey(sessionID))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		if o.log != nil {
+			o.log.Warn("agent log directory unavailable", "issue_identifier", identifier, "session_id", sessionID, "path", dir, "error", err)
+		}
+		return domain.RunLogPaths{}
+	}
+	return domain.RunLogPaths{
+		Protocol: filepath.Join(dir, "protocol.jsonl"),
+		Stderr:   filepath.Join(dir, "stderr.log"),
+		Result:   filepath.Join(dir, "result.json"),
+	}
 }
 
 func agentStallTimeout(cfg config.Effective) time.Duration {
@@ -330,6 +365,22 @@ func (o *Orchestrator) updateAttemptLocked(issueID, identifier string, attempt i
 	}
 }
 
+func (o *Orchestrator) updateAttemptLogsLocked(issueID string, attempt int, logs domain.RunLogPaths) {
+	if logs.Protocol == "" && logs.Stderr == "" && logs.Result == "" {
+		return
+	}
+	hist, ok := o.runHistory[issueID]
+	if !ok || len(hist) == 0 {
+		return
+	}
+	entry := hist[len(hist)-1]
+	if entry.Attempt == attempt {
+		entry.Logs = logs
+		hist[len(hist)-1] = entry
+		o.runHistory[issueID] = hist
+	}
+}
+
 func (o *Orchestrator) pendingRetryIDs() map[string]bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -376,6 +427,7 @@ func (o *Orchestrator) forwardEvents(ch <-chan agent.Event) {
 			r.lastEvent = ev.At
 			r.lastEventType = ev.Type
 			r.lastMessage = ev.Message
+			r.agentTextTail = appendAgentTextMessage(r.agentTextTail, ev, 100)
 			if ev.Type == "turn_completed" || ev.Type == "turn_started" {
 				r.turnCount++
 			}
@@ -412,6 +464,47 @@ func tokenDelta(current, previous int) int {
 	return current
 }
 
+func appendAgentTextMessage(tail []AgentTextMessage, ev agent.Event, limit int) []AgentTextMessage {
+	if ev.Text == "" {
+		return tail
+	}
+	at := ev.At
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if ev.ItemID != "" {
+		for i := len(tail) - 1; i >= 0; i-- {
+			if tail[i].itemID != ev.ItemID {
+				continue
+			}
+			if ev.Type == "item_agentMessage_delta" {
+				tail[i].Text += ev.Text
+			} else {
+				tail[i].Text = ev.Text
+			}
+			tail[i].At = at
+			tail[i].Event = ev.Type
+			return trimAgentTextTail(tail, limit)
+		}
+		tail = append(tail, AgentTextMessage{At: at, Event: ev.Type, Text: ev.Text, itemID: ev.ItemID})
+		return trimAgentTextTail(tail, limit)
+	}
+	if len(tail) > 0 && ev.Type == "item_agentMessage_delta" && tail[len(tail)-1].Event == ev.Type && tail[len(tail)-1].itemID == "" {
+		tail[len(tail)-1].Text += ev.Text
+		tail[len(tail)-1].At = at
+		return trimAgentTextTail(tail, limit)
+	}
+	tail = append(tail, AgentTextMessage{At: at, Event: ev.Type, Text: ev.Text})
+	return trimAgentTextTail(tail, limit)
+}
+
+func trimAgentTextTail(tail []AgentTextMessage, limit int) []AgentTextMessage {
+	if limit <= 0 || len(tail) <= limit {
+		return tail
+	}
+	return append([]AgentTextMessage(nil), tail[len(tail)-limit:]...)
+}
+
 func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed time.Duration) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -442,6 +535,9 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 			r.error = &errStr
 		}
 	}
+	if res.Logs.Protocol != "" || res.Logs.Stderr != "" || res.Logs.Result != "" {
+		r.logs = res.Logs
+	}
 	o.totals.SecondsRunning += elapsed.Seconds()
 	attempt := o.attempts[issue.ID]
 	finalStatus := r.status
@@ -451,6 +547,7 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 		if entry.Attempt == attempt {
 			entry.Status = domain.RunAttemptStatus(finalStatus)
 			entry.Error = r.error
+			entry.Logs = r.logs
 			hist[len(hist)-1] = entry
 			o.runHistory[issue.ID] = hist
 		}
@@ -599,11 +696,17 @@ func (o *Orchestrator) IssueSnapshot(identifier string) (IssueDetailSnapshot, bo
 }
 
 func (o *Orchestrator) runningSnapshotLocked(r running) RunningSnapshot {
+	logs := logsSnapshot(r.logs)
 	sn := RunningSnapshot{
 		IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, SessionID: r.sessionID,
 		ThreadID: r.threadID, TurnID: r.turnID,
 		Workspace: r.workspace, TurnCount: r.turnCount, State: r.issue.State, Status: r.status,
-		LastEvent: r.lastEventType, LastMessage: r.lastMessage, StartedAt: &r.started, LastEventAt: &r.lastEvent,
+		LastEvent: r.lastEventType, LastMessage: r.lastMessage, LogPath: r.logs.Protocol,
+		RecentAgentMessages: append([]AgentTextMessage(nil), r.agentTextTail...),
+		StartedAt:           &r.started, LastEventAt: &r.lastEvent,
+	}
+	if len(logs.CodexSessionLogs) > 0 {
+		sn.Logs = &logs
 	}
 	if r.issue.URL != nil {
 		url := *r.issue.URL
@@ -645,19 +748,52 @@ func retrySnapshot(r retryItem) RetrySnapshot {
 func (o *Orchestrator) issueDetailLocked(issue domain.Issue, status string, running *RunningSnapshot, retry *RetrySnapshot) IssueDetailSnapshot {
 	workspace := o.workspaceSnapshotLocked(issue.ID, running)
 	lastError := o.lastErrorLocked(issue.ID, running, retry)
+	logs := o.logsSnapshotLocked(issue.ID, running)
 	return IssueDetailSnapshot{
-		IssueIdentifier: issue.Identifier,
-		IssueID:         issue.ID,
-		Status:          status,
-		Workspace:       workspace,
-		Attempts:        o.attemptsSnapshotLocked(issue.ID),
-		Running:         running,
-		Retry:           retry,
-		Logs:            LogsSnapshot{CodexSessionLogs: []LogSnapshot{}},
-		RecentEvents:    o.recentEventsLocked(issue.ID, 20),
-		LastError:       lastError,
-		Tracked:         trackedIssue(issue),
+		IssueIdentifier:     issue.Identifier,
+		IssueID:             issue.ID,
+		Status:              status,
+		Workspace:           workspace,
+		Attempts:            o.attemptsSnapshotLocked(issue.ID),
+		Running:             running,
+		Retry:               retry,
+		Logs:                logs,
+		RecentAgentMessages: o.recentAgentMessagesLocked(issue.ID, 100),
+		RecentEvents:        o.recentEventsLocked(issue.ID, 20),
+		LastError:           lastError,
+		Tracked:             trackedIssue(issue),
 	}
+}
+
+func (o *Orchestrator) logsSnapshotLocked(issueID string, running *RunningSnapshot) LogsSnapshot {
+	if running != nil && running.Logs != nil {
+		return *running.Logs
+	}
+	hist := o.runHistory[issueID]
+	for i := len(hist) - 1; i >= 0; i-- {
+		logs := logsSnapshot(hist[i].Logs)
+		if len(logs.CodexSessionLogs) > 0 {
+			return logs
+		}
+	}
+	return LogsSnapshot{CodexSessionLogs: []LogSnapshot{}}
+}
+
+func logsSnapshot(paths domain.RunLogPaths) LogsSnapshot {
+	out := LogsSnapshot{CodexSessionLogs: []LogSnapshot{}}
+	for _, item := range []struct {
+		label string
+		path  string
+	}{
+		{label: "protocol", path: paths.Protocol},
+		{label: "stderr", path: paths.Stderr},
+		{label: "result", path: paths.Result},
+	} {
+		if item.path != "" {
+			out.CodexSessionLogs = append(out.CodexSessionLogs, LogSnapshot{Label: item.label, Path: item.path})
+		}
+	}
+	return out
 }
 
 func (o *Orchestrator) workspaceSnapshotLocked(issueID string, running *RunningSnapshot) *WorkspaceSnapshot {
@@ -708,6 +844,17 @@ func (o *Orchestrator) recentEventsLocked(issueID string, limit int) []EventSnap
 		events[i], events[j] = events[j], events[i]
 	}
 	return events
+}
+
+func (o *Orchestrator) recentAgentMessagesLocked(issueID string, limit int) []AgentTextMessage {
+	tail := []AgentTextMessage{}
+	for _, ev := range o.events {
+		if ev.IssueID != issueID {
+			continue
+		}
+		tail = appendAgentTextMessage(tail, ev, limit)
+	}
+	return tail
 }
 
 func trackedIssue(issue domain.Issue) map[string]any {

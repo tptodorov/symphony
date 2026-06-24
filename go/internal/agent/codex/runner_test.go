@@ -72,6 +72,49 @@ func TestRunnerCompletesFakeAppServerTurnAndPassesProtocolConfig(t *testing.T) {
 	}
 }
 
+func TestRunnerWritesAgentRunLogsAndExtractsText(t *testing.T) {
+	workspace := t.TempDir()
+	paths := domain.RunLogPaths{
+		Protocol: filepath.Join(workspace, "agent", "protocol.jsonl"),
+		Stderr:   filepath.Join(workspace, "agent", "stderr.log"),
+		Result:   filepath.Join(workspace, "agent", "result.json"),
+	}
+	r := New(fakeCodexCommand(t, "success", filepath.Join(workspace, "fake-incoming.jsonl")))
+	events := make(chan agent.Event, 64)
+	res := r.Run(context.Background(), agent.RunRequest{
+		Issue:       domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Test issue"},
+		Workspace:   workspace,
+		Prompt:      "Do work",
+		SessionID:   "s",
+		ReadTimeout: time.Second,
+		TurnTimeout: time.Second,
+		Logs:        paths,
+	}, events)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if res.Logs.Protocol != paths.Protocol || res.Logs.Result != paths.Result {
+		t.Fatalf("logs = %+v", res.Logs)
+	}
+	protocol, err := os.ReadFile(paths.Protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(protocol), `"direction":"send"`) || !strings.Contains(string(protocol), `"direction":"recv"`) || !strings.Contains(string(protocol), "item/agentMessage/delta") {
+		t.Fatalf("protocol log missing expected entries: %s", protocol)
+	}
+	result, err := os.ReadFile(paths.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(result), `"completed": true`) {
+		t.Fatalf("result log missing completion: %s", result)
+	}
+	if !hasTextEvent(events, "I am checking the tests.") {
+		t.Fatalf("missing agent text event")
+	}
+}
+
 func TestRunnerMapsAppServerFailures(t *testing.T) {
 	for _, tc := range []struct {
 		scenario string
@@ -303,6 +346,11 @@ func runFakeCodexAppServer() {
 			}
 			send(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thr_1", "turn": map[string]any{"id": turnID, "status": "inProgress"}}})
 			send(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{"threadId": "thr_1", "total_token_usage": map[string]any{"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}, "rate_limits": map[string]any{"primary": "ok"}}})
+			itemID := "msg_" + turnID
+			send(map[string]any{"method": "item/started", "params": map[string]any{"threadId": "thr_1", "turnId": turnID, "item": map[string]any{"type": "agentMessage", "id": itemID, "text": "", "phase": "commentary"}}})
+			send(map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{"threadId": "thr_1", "turnId": turnID, "itemId": itemID, "delta": "I am "}})
+			send(map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{"threadId": "thr_1", "turnId": turnID, "itemId": itemID, "delta": "checking the tests."}})
+			send(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": "thr_1", "turnId": turnID, "item": map[string]any{"type": "agentMessage", "id": itemID, "text": "I am checking the tests.", "phase": "commentary"}}})
 			switch scenario {
 			case "failed":
 				complete("failed", "model failed")
@@ -414,6 +462,19 @@ func hasEvent(events <-chan agent.Event, typeName string) bool {
 		select {
 		case event := <-events:
 			if event.Type == typeName {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
+
+func hasTextEvent(events <-chan agent.Event, text string) bool {
+	for {
+		select {
+		case event := <-events:
+			if event.Text == text {
 				return true
 			}
 		default:
