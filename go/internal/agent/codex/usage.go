@@ -11,12 +11,11 @@ func ExtractUsage(b []byte) domain.TokenUsage {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return domain.TokenUsage{}
 	}
-	if found := findUsage(m); found != nil {
-		return domain.TokenUsage{
-			InputTokens:  asInt(first(found["input_tokens"], found["inputTokens"])),
-			OutputTokens: asInt(first(found["output_tokens"], found["outputTokens"])),
-			TotalTokens:  asInt(first(found["total_tokens"], found["totalTokens"])),
-		}
+	if found := findAbsoluteUsage(m); found != nil {
+		return usageFromMap(found)
+	}
+	if found := findDefinedGenericUsage(m); found != nil {
+		return usageFromMap(found)
 	}
 	return domain.TokenUsage{}
 }
@@ -29,24 +28,58 @@ func ExtractRateLimits(b []byte) map[string]any {
 	return findRateLimits(m)
 }
 
-func findUsage(v any) map[string]any {
+func findAbsoluteUsage(v any) map[string]any {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return nil
 	}
-	for _, key := range []string{"usage", "total_token_usage", "totalTokenUsage"} {
+	if tokenUsage, ok := m["tokenUsage"].(map[string]any); ok {
+		if total, ok := tokenUsage["total"].(map[string]any); ok && hasUsageShape(total) {
+			return total
+		}
+	}
+	if tokenUsage, ok := m["token_usage"].(map[string]any); ok {
+		if total, ok := tokenUsage["total"].(map[string]any); ok && hasUsageShape(total) {
+			return total
+		}
+	}
+	for _, key := range []string{"total_token_usage", "totalTokenUsage"} {
 		if child, ok := m[key].(map[string]any); ok {
 			return child
 		}
 	}
-	if hasAny(m, "input_tokens", "output_tokens", "total_tokens", "inputTokens", "outputTokens", "totalTokens") {
-		return m
-	}
 	for key, child := range m {
-		if key == "last_token_usage" || key == "lastTokenUsage" {
+		if isDeltaUsageKey(key) {
 			continue
 		}
-		if found := findUsage(child); found != nil {
+		if found := findAbsoluteUsage(child); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func findDefinedGenericUsage(m map[string]any) map[string]any {
+	method, _ := m["method"].(string)
+	if method != "thread/tokenUsage/updated" && method != "turn/completed" {
+		return nil
+	}
+	return findUsageKey(m)
+}
+
+func findUsageKey(v any) map[string]any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if child, ok := m["usage"].(map[string]any); ok && hasUsageShape(child) {
+		return child
+	}
+	for key, child := range m {
+		if isDeltaUsageKey(key) {
+			continue
+		}
+		if found := findUsageKey(child); found != nil {
 			return found
 		}
 	}
@@ -78,6 +111,22 @@ func hasAny(m map[string]any, keys ...string) bool {
 		}
 	}
 	return false
+}
+
+func hasUsageShape(m map[string]any) bool {
+	return hasAny(m, "input_tokens", "output_tokens", "total_tokens", "inputTokens", "outputTokens", "totalTokens")
+}
+
+func isDeltaUsageKey(key string) bool {
+	return key == "last" || key == "last_token_usage" || key == "lastTokenUsage"
+}
+
+func usageFromMap(found map[string]any) domain.TokenUsage {
+	return domain.TokenUsage{
+		InputTokens:  asInt(first(found["input_tokens"], found["inputTokens"])),
+		OutputTokens: asInt(first(found["output_tokens"], found["outputTokens"])),
+		TotalTokens:  asInt(first(found["total_tokens"], found["totalTokens"])),
+	}
 }
 
 func first(values ...any) any {

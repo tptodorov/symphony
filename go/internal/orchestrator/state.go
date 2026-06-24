@@ -31,5 +31,8 @@ type retryItem struct {
 	err     string
 }
 
-// cancelled tracks issues whose worker was terminated by reconciliation
-// so workerExit can distinguish cancellation from normal/completed exit.
+type cancellationReason struct {
+	status domain.RunAttemptStatus
+	err    string
+	retry  bool
+}

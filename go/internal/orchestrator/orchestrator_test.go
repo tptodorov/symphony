@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,6 +75,39 @@ func TestForwardEventsAdoptsAgentSessionIdentity(t *testing.T) {
 	}
 }
 
+func TestForwardEventsDoesNotDoubleCountAcrossNonUsageEvents(t *testing.T) {
+	cfg := config.Defaults()
+	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
+	started := time.Now()
+	o.mu.Lock()
+	o.running["1"] = running{
+		issue:         domain.Issue{ID: "1", Identifier: "A-1", Title: "T", State: "Todo"},
+		sessionID:     "A-1-dispatch",
+		workspace:     filepath.Join(t.TempDir(), "A-1"),
+		started:       started,
+		lastEvent:     started,
+		status:        "running",
+		lastEventType: "session_started",
+	}
+	o.mu.Unlock()
+
+	events := make(chan agent.Event, 3)
+	events <- agent.Event{IssueID: "1", Type: "thread_tokenUsage_updated", Usage: domain.TokenUsage{InputTokens: 70, OutputTokens: 30, TotalTokens: 100}, At: time.Now()}
+	events <- agent.Event{IssueID: "1", Type: "item_agentMessage_delta", Message: "working", At: time.Now()}
+	events <- agent.Event{IssueID: "1", Type: "thread_tokenUsage_updated", Usage: domain.TokenUsage{InputTokens: 105, OutputTokens: 45, TotalTokens: 150}, At: time.Now()}
+	close(events)
+
+	o.forwardEvents(events)
+
+	sn := o.Snapshot()
+	if sn.AgentTotals.TotalTokens != 150 || sn.AgentTotals.InputTokens != 105 || sn.AgentTotals.OutputTokens != 45 {
+		t.Fatalf("agent totals = %+v", sn.AgentTotals)
+	}
+	if len(sn.Running) != 1 || sn.Running[0].Tokens == nil || sn.Running[0].Tokens.TotalTokens != 150 {
+		t.Fatalf("running tokens = %+v", sn.Running)
+	}
+}
+
 func TestBackoff(t *testing.T) {
 	if got := backoff(3, 30*time.Second); got != 30*time.Second {
 		t.Fatal(got)
@@ -130,5 +164,53 @@ func TestDispatchPreparationFailureSchedulesRetry(t *testing.T) {
 	}
 	if got := o.Snapshot().Counts["retrying"]; got != 1 {
 		t.Fatalf("retry should remain queued, got %d", got)
+	}
+}
+
+func TestStallCancellationRecordsStalledRetry(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TrackerKind = "linear"
+	cfg.ActiveStates = []string{"Todo"}
+	cfg.Codex.StallTimeout = time.Millisecond
+	issue := domain.Issue{ID: "1", Identifier: "A-1", Title: "T", State: "Todo"}
+	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := time.Now().Add(-time.Second)
+	o.mu.Lock()
+	o.running[issue.ID] = running{
+		issue:         issue,
+		sessionID:     "A-1-dispatch",
+		workspace:     filepath.Join(t.TempDir(), "A-1"),
+		started:       started,
+		lastEvent:     started,
+		status:        "running",
+		lastEventType: "session_started",
+		cancel:        cancel,
+	}
+	o.runHistory[issue.ID] = []domain.RunAttempt{{IssueID: issue.ID, IssueIdentifier: issue.Identifier, Attempt: 0, WorkspacePath: filepath.Join(t.TempDir(), "A-1"), StartedAt: started, Status: domain.RunAttemptStreaming}}
+	o.mu.Unlock()
+
+	if err := o.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("run context was not canceled: %v", ctx.Err())
+	}
+
+	o.workerExit(issue, agent.Result{Err: ctx.Err()}, time.Second)
+
+	sn := o.Snapshot()
+	if sn.Counts["retrying"] != 1 || len(sn.Retrying) != 1 {
+		t.Fatalf("retry not queued: %+v", sn)
+	}
+	if !strings.Contains(sn.Retrying[0].Error, "stalled: no agent event") {
+		t.Fatalf("retry error = %q", sn.Retrying[0].Error)
+	}
+	o.mu.Lock()
+	hist := append([]domain.RunAttempt(nil), o.runHistory[issue.ID]...)
+	o.mu.Unlock()
+	if len(hist) != 1 || hist[0].Status != domain.RunAttemptStalled || hist[0].Error == nil || !strings.Contains(*hist[0].Error, "stalled: no agent event") {
+		t.Fatalf("history = %+v", hist)
 	}
 }

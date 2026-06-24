@@ -27,7 +27,7 @@ type Orchestrator struct {
 	claimed    map[string]domain.Issue
 	attempts   map[string]int
 	completed  map[string]time.Time
-	cancelled  map[string]bool
+	cancelled  map[string]cancellationReason
 	retries    map[string]retryItem
 	events     []agent.Event
 	totals     domain.AgentTotals
@@ -41,7 +41,7 @@ func New(cfg config.Effective, tr tracker.Tracker, runner agent.Runner, wm works
 }
 
 func NewWithLogger(cfg config.Effective, tr tracker.Tracker, runner agent.Runner, wm workspace.Manager, log *slog.Logger) *Orchestrator {
-	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]bool{}, retries: map[string]retryItem{}, rateLimits: nil, runHistory: map[string][]domain.RunAttempt{}, log: log}
+	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]cancellationReason{}, retries: map[string]retryItem{}, rateLimits: nil, runHistory: map[string][]domain.RunAttempt{}, log: log}
 }
 
 func (o *Orchestrator) UpdateConfig(cfg config.Effective) { o.mu.Lock(); o.cfg = cfg; o.mu.Unlock() }
@@ -382,24 +382,34 @@ func (o *Orchestrator) forwardEvents(ch <-chan agent.Event) {
 			if ev.RateLimits != nil {
 				o.rateLimits = ev.RateLimits
 			}
-			if ev.Usage.TotalTokens != 0 && ev.Usage.TotalTokens >= r.lastReportedTotalTokens {
-				deltaIn := ev.Usage.InputTokens - r.lastReportedInputTokens
-				deltaOut := ev.Usage.OutputTokens - r.lastReportedOutputTokens
-				deltaTotal := ev.Usage.TotalTokens - r.lastReportedTotalTokens
+			if ev.Usage.TotalTokens != 0 {
+				deltaIn := tokenDelta(ev.Usage.InputTokens, r.lastReportedInputTokens)
+				deltaOut := tokenDelta(ev.Usage.OutputTokens, r.lastReportedOutputTokens)
+				deltaTotal := tokenDelta(ev.Usage.TotalTokens, r.lastReportedTotalTokens)
 				r.agentInputTokens += deltaIn
 				r.agentOutputTokens += deltaOut
 				r.agentTotalTokens += deltaTotal
 				o.totals.TotalTokens += deltaTotal
 				o.totals.InputTokens += deltaIn
 				o.totals.OutputTokens += deltaOut
+				r.lastReportedInputTokens = ev.Usage.InputTokens
+				r.lastReportedOutputTokens = ev.Usage.OutputTokens
+				r.lastReportedTotalTokens = ev.Usage.TotalTokens
 			}
-			r.lastReportedInputTokens = ev.Usage.InputTokens
-			r.lastReportedOutputTokens = ev.Usage.OutputTokens
-			r.lastReportedTotalTokens = ev.Usage.TotalTokens
 			o.running[ev.IssueID] = r
 		}
 		o.mu.Unlock()
 	}
+}
+
+func tokenDelta(current, previous int) int {
+	if current == 0 {
+		return 0
+	}
+	if current >= previous {
+		return current - previous
+	}
+	return current
 }
 
 func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed time.Duration) {
@@ -407,6 +417,10 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 	defer o.mu.Unlock()
 	r := o.running[issue.ID]
 	delete(o.running, issue.ID)
+	cancelReason, wasCancelled := o.cancelled[issue.ID]
+	if wasCancelled {
+		delete(o.cancelled, issue.ID)
+	}
 	r.status = "succeeded"
 	r.error = nil
 	if !res.Completed {
@@ -420,14 +434,17 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 		errStr := res.Err.Error()
 		r.error = &errStr
 	}
+	if wasCancelled {
+		r.status = string(cancelReason.status)
+		r.error = nil
+		if cancelReason.err != "" {
+			errStr := cancelReason.err
+			r.error = &errStr
+		}
+	}
 	o.totals.SecondsRunning += elapsed.Seconds()
 	attempt := o.attempts[issue.ID]
 	finalStatus := r.status
-	wasCancelled := o.cancelled[issue.ID]
-	if wasCancelled {
-		delete(o.cancelled, issue.ID)
-		finalStatus = "canceled_by_reconciliation"
-	}
 	hist, ok := o.runHistory[issue.ID]
 	if ok && len(hist) > 0 {
 		entry := hist[len(hist)-1]
@@ -438,13 +455,13 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 			o.runHistory[issue.ID] = hist
 		}
 	}
-	if wasCancelled {
+	if wasCancelled && !cancelReason.retry {
 		if o.log != nil {
 			o.log.Info("worker exit", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "session_id", r.sessionID, "status", finalStatus)
 		}
 		return
 	}
-	if res.Completed {
+	if res.Completed && !wasCancelled {
 		o.completed[issue.ID] = time.Now()
 		o.retries[issue.ID] = retryItem{issue: issue, attempt: 1, at: time.Now().Add(time.Second)}
 		if o.log != nil {
@@ -455,7 +472,7 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 	}
 	o.attempts[issue.ID]++
 	delay := time.Second
-	if res.Err != nil {
+	if res.Err != nil || (wasCancelled && cancelReason.retry) {
 		delay = backoff(o.attempts[issue.ID], o.cfg.Agent.MaxRetryBackoff)
 	}
 	errStr := ""
@@ -476,6 +493,14 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 	ids := make([]string, 0, len(o.running))
 	for id, r := range o.running {
 		if stall := agentStallTimeout(cfg); stall > 0 && now.Sub(r.lastEvent) > stall {
+			errStr := fmt.Sprintf("stalled: no agent event for %s", now.Sub(r.lastEvent).Round(time.Millisecond))
+			r.status = string(domain.RunAttemptStalled)
+			r.error = &errStr
+			o.running[id] = r
+			o.cancelled[id] = cancellationReason{status: domain.RunAttemptStalled, err: errStr, retry: true}
+			if o.log != nil {
+				observability.Reconciliation(o.log, id, r.issue.Identifier, "stall_timeout")
+			}
 			r.cancel()
 			continue
 		}
@@ -495,7 +520,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 		if issue, ok := states[id]; ok {
 			if containsNorm(cfg.TerminalStates, issue.State) {
 				r.cancel()
-				o.cancelled[id] = true
+				o.cancelled[id] = cancellationReason{status: domain.RunAttemptCanceled}
 				o.completed[id] = time.Now()
 				if o.log != nil {
 					observability.Reconciliation(o.log, id, r.issue.Identifier, "terminal_cancel")
@@ -505,7 +530,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 				}(r.issue.Identifier, cfg.Hooks)
 			} else if !containsNorm(cfg.ActiveStates, issue.State) || !domain.IssueIsEligible(issue, cfg) {
 				r.cancel()
-				o.cancelled[id] = true
+				o.cancelled[id] = cancellationReason{status: domain.RunAttemptCanceled}
 				if o.log != nil {
 					observability.Reconciliation(o.log, id, r.issue.Identifier, "inactive_cancel")
 				}
@@ -531,7 +556,7 @@ func (o *Orchestrator) cancelAll() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for id, r := range o.running {
-		o.cancelled[id] = true
+		o.cancelled[id] = cancellationReason{status: domain.RunAttemptCanceled}
 		r.cancel()
 	}
 }
