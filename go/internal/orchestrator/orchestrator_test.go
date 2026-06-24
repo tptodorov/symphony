@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openai/symphony/go/internal/agent"
 	agentfake "github.com/openai/symphony/go/internal/agent/fake"
 	"github.com/openai/symphony/go/internal/config"
 	"github.com/openai/symphony/go/internal/domain"
@@ -32,6 +33,47 @@ func TestDispatch(t *testing.T) {
 		t.Fatalf("runs=%d", r.Count())
 	}
 }
+
+func TestForwardEventsAdoptsAgentSessionIdentity(t *testing.T) {
+	cfg := config.Defaults()
+	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
+	started := time.Now()
+	o.mu.Lock()
+	o.running["1"] = running{
+		issue:         domain.Issue{ID: "1", Identifier: "A-1", Title: "T", State: "Todo"},
+		sessionID:     "A-1-dispatch",
+		workspace:     filepath.Join(t.TempDir(), "A-1"),
+		started:       started,
+		lastEvent:     started,
+		status:        "running",
+		lastEventType: "session_started",
+	}
+	o.mu.Unlock()
+
+	events := make(chan agent.Event, 1)
+	events <- agent.Event{
+		IssueID:   "1",
+		SessionID: "thread-1-turn-1",
+		ThreadID:  "thread-1",
+		TurnID:    "turn-1",
+		Type:      "session_started",
+		Message:   "turn started",
+		At:        time.Now(),
+	}
+	close(events)
+
+	o.forwardEvents(events)
+
+	sn := o.Snapshot()
+	if len(sn.Running) != 1 {
+		t.Fatalf("running count = %d", len(sn.Running))
+	}
+	running := sn.Running[0]
+	if running.SessionID != "thread-1-turn-1" || running.ThreadID != "thread-1" || running.TurnID != "turn-1" {
+		t.Fatalf("unexpected identity: %+v", running)
+	}
+}
+
 func TestBackoff(t *testing.T) {
 	if got := backoff(3, 30*time.Second); got != 30*time.Second {
 		t.Fatal(got)

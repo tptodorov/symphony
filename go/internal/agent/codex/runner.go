@@ -6,53 +6,65 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/openai/symphony/go/internal/agent"
+	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/tools"
 )
+
+const defaultReadTimeout = 5 * time.Second
+const continuationPrompt = "Continue working on the same issue. Re-check the tracker state and move the issue toward the workflow-defined handoff state. Do not repeat context already present in this thread."
 
 type Runner struct {
 	Command     string
+	ReadTimeout time.Duration
 	TurnTimeout time.Duration
 }
 
 func New(command string) *Runner { return &Runner{Command: command} }
 
-func eventType(line string) string {
-	var msg map[string]any
-	if err := json.Unmarshal([]byte(line), &msg); err == nil {
-		if t, ok := msg["type"].(string); ok && t != "" {
-			return t
-		}
-		if e, ok := msg["event"].(string); ok && e != "" {
-			return e
-		}
-	}
-	if strings.Contains(line, "turn.completed") || strings.Contains(line, "task_complete") {
-		return "turn_completed"
-	}
-	if strings.Contains(line, "turn.failed") || strings.Contains(line, "turn_failed") {
-		return "turn_failed"
-	}
-	if strings.Contains(line, "turn.cancelled") || strings.Contains(line, "turn_cancelled") {
-		return "turn_cancelled"
-	}
-	if strings.Contains(line, "approval.auto_approved") || strings.Contains(line, "auto_approved") {
-		return "approval_auto_approved"
-	}
-	if strings.Contains(line, "unsupported_tool") || strings.Contains(line, "tool_call") {
-		return "unsupported_tool_call"
-	}
-	if strings.Contains(line, "input_required") || strings.Contains(line, "turn_input_required") {
-		return "turn_input_required"
-	}
-	if strings.Contains(line, "error") {
-		return "turn_ended_with_error"
-	}
-	return "other_message"
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+}
+
+type rpcMessage struct {
+	ID     json.RawMessage `json:"id,omitempty"`
+	Method string          `json:"method,omitempty"`
+	Params json.RawMessage `json:"params,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *rpcError       `json:"error,omitempty"`
+}
+
+type turnResult struct {
+	Completed bool
+	Err       error
+}
+
+type appServerClient struct {
+	ctx         context.Context
+	stdin       io.WriteCloser
+	req         agent.RunRequest
+	events      chan<- agent.Event
+	readTimeout time.Duration
+
+	mu        sync.Mutex
+	nextID    int
+	pending   map[string]chan rpcMessage
+	threadID  string
+	turnID    string
+	sessionID string
+	started   bool
+	usage     domain.TokenUsage
+	turnDone  chan turnResult
 }
 
 func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- agent.Event) agent.Result {
@@ -66,52 +78,26 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	if req.Workspace == "" {
 		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("workspace path is required")}
 	}
-	if req.TurnTimeout > 0 {
+	turnTimeout := req.TurnTimeout
+	if turnTimeout == 0 {
+		turnTimeout = r.TurnTimeout
+	}
+	if turnTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, req.TurnTimeout)
+		ctx, cancel = context.WithTimeout(ctx, turnTimeout)
 		defer cancel()
 	}
+	readTimeout := req.ReadTimeout
+	if readTimeout == 0 {
+		readTimeout = r.ReadTimeout
+	}
+	if readTimeout == 0 {
+		readTimeout = defaultReadTimeout
+	}
+
 	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
 	cmd.Dir = req.Workspace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if req.Policy != nil {
-		if b, err := json.Marshal(req.Policy); err == nil {
-			cmd.Env = append(cmd.Environ(), "SYMPHONY_CODEX_POLICY="+string(b))
-		}
-	}
-	if req.EnableBeadsCLI || req.EnableLinearGraphQL {
-		tools := []map[string]any{}
-		if req.EnableBeadsCLI {
-			tools = append(tools, map[string]any{
-				"name":        "beads_cli",
-				"description": "Execute bd CLI commands using the configured tracker.bd_command in the repository working directory.",
-				"input_schema": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"args": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					},
-					"required": []string{"args"},
-				},
-			})
-		}
-		if req.EnableLinearGraphQL {
-			tools = append(tools, map[string]any{
-				"name":        "linear_graphql",
-				"description": "Execute a raw GraphQL query or mutation against Linear using configured tracker auth.",
-				"input_schema": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"query":     map[string]any{"type": "string"},
-						"variables": map[string]any{"type": "object"},
-					},
-					"required": []string{"query"},
-				},
-			})
-		}
-		if b, err := json.Marshal(map[string]any{"tools": tools}); err == nil {
-			cmd.Env = append(cmd.Environ(), "SYMPHONY_TOOLS="+string(b))
-		}
-	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("open stdin: %w", err)}
@@ -125,55 +111,655 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	if err := cmd.Start(); err != nil {
 		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("start codex: %w", err)}
 	}
-	_, _ = stdin.Write([]byte(req.Prompt + "\n"))
-	_ = stdin.Close()
-	usage := ExtractUsage(nil)
-	completed := false
-	var threadID, turnID string
-	sessionID := req.SessionID
+
+	client := &appServerClient{
+		ctx:         ctx,
+		stdin:       stdin,
+		req:         req,
+		events:      events,
+		readTimeout: readTimeout,
+		nextID:      1,
+		pending:     map[string]chan rpcMessage{},
+		sessionID:   req.SessionID,
+		turnDone:    make(chan turnResult, 1),
+	}
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
-		s := bufio.NewScanner(stdout)
-		s.Buffer(make([]byte, 64*1024), 10*1024*1024)
-		for s.Scan() {
-			line := s.Text()
-			u := ExtractUsage([]byte(line))
-			if u.TotalTokens != 0 {
-				usage = u
-			}
-			if IsTerminalEvent(line) {
-				completed = true
-			}
-			tid, turn := extractThreadTurnID(line)
-			if tid != "" {
-				threadID = tid
-			}
-			if turn != "" {
-				turnID = turn
-			}
-			if threadID != "" && turnID != "" {
-				sessionID = threadID + "-" + turnID
-			}
-			select {
-			case events <- agent.Event{SessionID: sessionID, IssueID: req.Issue.ID, Type: eventType(line), Message: line, Usage: u, RateLimits: ExtractRateLimits([]byte(line)), At: time.Now()}:
-			case <-ctx.Done():
-				return
-			}
-		}
+		client.scan(stdout)
 	}()
-	err = cmd.Wait()
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	defer stopAppServer(cmd, stdin, waitDone, scanDone)
+
+	if err := client.initialize(); err != nil {
+		return client.result(err, false)
+	}
+	threadID, err := client.startThread()
+	if err != nil {
+		return client.result(err, false)
+	}
+	maxTurns := req.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 1
+	}
+	var res turnResult
+	for turnIndex := 0; turnIndex < maxTurns; turnIndex++ {
+		prompt := req.Prompt
+		if turnIndex > 0 {
+			prompt = continuationPrompt
+		}
+		client.prepareTurn(threadID)
+		turnID, err := client.startTurn(threadID, prompt)
+		if err != nil {
+			return client.result(err, false)
+		}
+		client.setTurn(threadID, turnID)
+
+		res = client.waitForTurn()
+		if res.Err != nil || !res.Completed {
+			return client.result(res.Err, res.Completed)
+		}
+	}
+	return client.result(res.Err, res.Completed)
+}
+
+func stopAppServer(cmd *exec.Cmd, stdin io.Closer, waitDone <-chan error, scanDone <-chan struct{}) {
+	_ = stdin.Close()
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	}
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		<-waitDone
+	}
 	<-scanDone
-	if ctx.Err() != nil {
-		return agent.Result{SessionID: sessionID, Usage: usage, Err: ctx.Err()}
+}
+
+func (c *appServerClient) initialize() error {
+	_, err := c.request("initialize", map[string]any{
+		"clientInfo": map[string]any{
+			"name":    "symphony_go",
+			"title":   "Symphony Go",
+			"version": "0.1.0",
+		},
+		"capabilities": map[string]any{"experimentalApi": true},
+	})
+	if err != nil {
+		return err
+	}
+	return c.notify("initialized", map[string]any{})
+}
+
+func (c *appServerClient) startThread() (string, error) {
+	result, err := c.request("thread/start", c.threadStartParams())
+	if err != nil {
+		return "", err
+	}
+	id := nestedID(result, "thread")
+	if id == "" {
+		return "", fmt.Errorf("response_error: thread/start did not return thread.id")
+	}
+	return id, nil
+}
+
+func (c *appServerClient) startTurn(threadID, prompt string) (string, error) {
+	result, err := c.request("turn/start", c.turnStartParams(threadID, prompt))
+	if err != nil {
+		return "", err
+	}
+	id := nestedID(result, "turn")
+	if id == "" {
+		return "", fmt.Errorf("response_error: turn/start did not return turn.id")
+	}
+	return id, nil
+}
+
+func (c *appServerClient) threadStartParams() map[string]any {
+	params := map[string]any{"cwd": c.req.Workspace, "serviceName": "symphony_go"}
+	policy := policyMap(c.req.Policy)
+	if v, ok := policy["approval_policy"]; ok {
+		params["approvalPolicy"] = v
+	}
+	if v, ok := policy["thread_sandbox"]; ok {
+		params["sandbox"] = v
+	}
+	if tools := c.dynamicTools(); len(tools) > 0 {
+		params["dynamicTools"] = tools
+	}
+	return params
+}
+
+func (c *appServerClient) turnStartParams(threadID, prompt string) map[string]any {
+	params := map[string]any{
+		"threadId": threadID,
+		"cwd":      c.req.Workspace,
+		"input":    []map[string]any{{"type": "text", "text": prompt}},
+	}
+	policy := policyMap(c.req.Policy)
+	if v, ok := policy["approval_policy"]; ok {
+		params["approvalPolicy"] = v
+	}
+	if v, ok := policy["turn_sandbox_policy"]; ok {
+		params["sandboxPolicy"] = v
+	}
+	return params
+}
+
+func (c *appServerClient) dynamicTools() []map[string]any {
+	out := []map[string]any{}
+	if c.req.EnableBeadsCLI {
+		out = append(out, map[string]any{
+			"name":        "beads_cli",
+			"description": "Execute bd CLI commands using the configured tracker.bd_command in the repository working directory.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"args": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				},
+				"required": []string{"args"},
+			},
+			"deferLoading": false,
+		})
+	}
+	if c.req.EnableLinearGraphQL {
+		out = append(out, map[string]any{
+			"name":        "linear_graphql",
+			"description": "Execute one Linear GraphQL query or mutation using Symphony's configured Linear endpoint and auth.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query":     map[string]any{"type": "string"},
+					"variables": map[string]any{"type": "object", "additionalProperties": true},
+				},
+				"required": []string{"query"},
+			},
+			"deferLoading": false,
+		})
+	}
+	return out
+}
+
+func (c *appServerClient) request(method string, params any) (json.RawMessage, error) {
+	id := c.nextRequestID()
+	key := strconv.Itoa(id)
+	ch := make(chan rpcMessage, 1)
+	c.mu.Lock()
+	c.pending[key] = ch
+	c.mu.Unlock()
+	if err := c.send(map[string]any{"method": method, "id": id, "params": params}); err != nil {
+		c.deletePending(key)
+		return nil, err
+	}
+	timer := time.NewTimer(c.readTimeout)
+	defer timer.Stop()
+	select {
+	case msg := <-ch:
+		if msg.Error != nil {
+			return nil, fmt.Errorf("response_error: %s", msg.Error.Message)
+		}
+		return msg.Result, nil
+	case <-timer.C:
+		c.deletePending(key)
+		return nil, fmt.Errorf("response_timeout: %s timed out after %s", method, c.readTimeout)
+	case <-c.ctx.Done():
+		c.deletePending(key)
+		return nil, c.ctx.Err()
+	}
+}
+
+func (c *appServerClient) notify(method string, params any) error {
+	return c.send(map[string]any{"method": method, "params": params})
+}
+
+func (c *appServerClient) send(message any) error {
+	b, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.stdin.Write(b); err != nil {
+		return fmt.Errorf("write codex JSON-RPC: %w", err)
+	}
+	return nil
+}
+
+func (c *appServerClient) scan(stdout io.Reader) {
+	s := bufio.NewScanner(stdout)
+	s.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	for s.Scan() {
+		line := s.Text()
+		var msg rpcMessage
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			c.emit("malformed_message", line, domain.TokenUsage{}, nil)
+			continue
+		}
+		if len(msg.ID) > 0 && msg.Method == "" {
+			c.observeResponse(msg.Result)
+			c.resolvePending(msg)
+			continue
+		}
+		if msg.Method != "" {
+			c.handleMessage(msg, line)
+		}
+	}
+	err := fmt.Errorf("port_exit: codex app-server stdout closed")
+	if scanErr := s.Err(); scanErr != nil {
+		err = fmt.Errorf("read codex stdout: %w", scanErr)
+	}
+	c.failPending(err)
+	c.finishTurn(turnResult{Err: err})
+}
+
+func (c *appServerClient) handleMessage(msg rpcMessage, line string) {
+	method := msg.Method
+	if method != "turn/completed" {
+		c.updateSessionFromParams(msg.Params)
+	}
+	if len(msg.ID) > 0 {
+		c.emit(c.eventType(method, msg.Params), line, ExtractUsage([]byte(line)), ExtractRateLimits([]byte(line)))
+		go c.respondToServerRequest(msg)
+		return
+	}
+	usage := ExtractUsage([]byte(line))
+	if usage.TotalTokens != 0 {
+		c.mu.Lock()
+		c.usage = usage
+		c.mu.Unlock()
+	}
+	c.emit(c.eventType(method, msg.Params), line, usage, ExtractRateLimits([]byte(line)))
+	if method == "turn/completed" {
+		c.finishTurn(c.turnCompletion(msg.Params))
+	}
+}
+
+func (c *appServerClient) respondToServerRequest(msg rpcMessage) {
+	method := msg.Method
+	var result any
+	var err *rpcError
+	switch {
+	case method == "mcpServer/elicitation/request" && c.shouldAutoApproveMCPToolCall(msg.Params):
+		result = map[string]any{"action": "accept", "content": map[string]any{}}
+	case method == "tool/requestUserInput" || method == "item/tool/requestUserInput" || method == "mcpServer/elicitation/request":
+		err = &rpcError{Code: -32000, Message: "turn_input_required: Symphony does not provide interactive user input to autonomous runs"}
+		c.finishTurn(turnResult{Err: fmt.Errorf("turn_input_required")})
+	case method == "item/commandExecution/requestApproval" || method == "item/fileChange/requestApproval":
+		result = map[string]any{"decision": "accept"}
+	case method == "item/permissions/requestApproval":
+		result = map[string]any{"permissions": rawParamField(msg.Params, "permissions", map[string]any{}), "scope": "turn", "strictAutoReview": false}
+	case method == "item/tool/call":
+		result = c.handleDynamicToolCall(msg.Params)
+	default:
+		err = &rpcError{Code: -32601, Message: "unsupported_tool_call: " + method}
 	}
 	if err != nil {
-		return agent.Result{SessionID: sessionID, Usage: usage, Err: fmt.Errorf("codex exited: %w: %s", err, stderr.String())}
+		_ = c.send(map[string]any{"id": msg.ID, "error": err})
+		return
 	}
-	if !completed {
-		return agent.Result{SessionID: sessionID, Usage: usage, Err: fmt.Errorf("codex exited without terminal event")}
+	_ = c.send(map[string]any{"id": msg.ID, "result": result})
+}
+
+func (c *appServerClient) handleDynamicToolCall(params json.RawMessage) map[string]any {
+	var root map[string]any
+	if err := json.Unmarshal(params, &root); err != nil {
+		return dynamicToolFailure("invalid tool call params")
 	}
-	return agent.Result{SessionID: sessionID, Usage: usage, Completed: completed}
+	toolName, _ := root["tool"].(string)
+	switch toolName {
+	case "beads_cli":
+		args, ok := stringSliceField(root["arguments"], "args")
+		if !ok || len(args) == 0 {
+			return dynamicToolFailure("beads_cli requires args")
+		}
+		result := tools.ExecuteBeadsCLI(c.ctx, c.req.Workspace, c.req.TrackerBDCommand, args)
+		return dynamicToolResult(result)
+	case "linear_graphql":
+		query, variables, err := parseLinearGraphQLArgs(root["arguments"])
+		if err != nil {
+			return dynamicToolFailure(err.Error())
+		}
+		result := tools.ExecuteLinearGraphQL(c.ctx, c.req.TrackerEndpoint, c.req.TrackerAPIKey, query, variables)
+		return dynamicToolResult(result)
+	default:
+		return dynamicToolFailure("unsupported_tool_call: " + firstNonEmpty(toolName, "unknown"))
+	}
+}
+
+func dynamicToolResult(result tools.ToolResult) map[string]any {
+	b, _ := json.Marshal(result)
+	return map[string]any{"success": result.Success, "contentItems": []map[string]any{{"type": "inputText", "text": string(b)}}}
+}
+
+func dynamicToolFailure(message string) map[string]any {
+	b, _ := json.Marshal(map[string]any{"error": message})
+	return map[string]any{"success": false, "contentItems": []map[string]any{{"type": "inputText", "text": string(b)}}}
+}
+
+func parseLinearGraphQLArgs(v any) (string, map[string]any, error) {
+	if s, ok := v.(string); ok {
+		if strings.TrimSpace(s) == "" {
+			return "", nil, fmt.Errorf("query must be non-empty")
+		}
+		return s, map[string]any{}, nil
+	}
+	root, ok := v.(map[string]any)
+	if !ok || root == nil {
+		return "", nil, fmt.Errorf("arguments must be an object or GraphQL query string")
+	}
+	query, ok := root["query"].(string)
+	if !ok || strings.TrimSpace(query) == "" {
+		return "", nil, fmt.Errorf("query must be non-empty")
+	}
+	variables := map[string]any{}
+	if raw, ok := root["variables"]; ok {
+		parsed, ok := raw.(map[string]any)
+		if !ok {
+			return "", nil, fmt.Errorf("variables must be an object")
+		}
+		variables = parsed
+	}
+	return query, variables, nil
+}
+
+func (c *appServerClient) shouldAutoApproveMCPToolCall(params json.RawMessage) bool {
+	var root map[string]any
+	if err := json.Unmarshal(params, &root); err != nil {
+		return false
+	}
+	meta, _ := root["_meta"].(map[string]any)
+	schema, _ := root["requestedSchema"].(map[string]any)
+	required, _ := schema["required"].([]any)
+	properties, _ := schema["properties"].(map[string]any)
+	return fmt.Sprint(root["serverName"]) == "atlassian" &&
+		meta["codex_approval_kind"] == "mcp_tool_call" &&
+		len(required) == 0 &&
+		len(properties) == 0
+}
+
+func (c *appServerClient) waitForTurn() turnResult {
+	select {
+	case res := <-c.turnDone:
+		return res
+	case <-c.ctx.Done():
+		return turnResult{Err: c.ctx.Err()}
+	}
+}
+
+func (c *appServerClient) turnCompletion(params json.RawMessage) turnResult {
+	var root map[string]any
+	if err := json.Unmarshal(params, &root); err != nil {
+		return turnResult{Err: fmt.Errorf("turn_failed: invalid turn/completed params")}
+	}
+	turn, _ := root["turn"].(map[string]any)
+	current := c.currentTurnID()
+	if current == "" {
+		return turnResult{}
+	}
+	if id := strValue(turn["id"]); id != "" && id != current {
+		return turnResult{}
+	}
+	status, _ := turn["status"].(string)
+	switch status {
+	case "completed":
+		return turnResult{Completed: true}
+	case "interrupted":
+		return turnResult{Err: fmt.Errorf("turn_cancelled")}
+	default:
+		msg := status
+		if errObj, _ := turn["error"].(map[string]any); errObj != nil {
+			if s, _ := errObj["message"].(string); s != "" {
+				msg = s
+			}
+		}
+		if msg == "" {
+			msg = "unknown"
+		}
+		return turnResult{Err: fmt.Errorf("turn_failed: %s", msg)}
+	}
+}
+
+func (c *appServerClient) eventType(method string, params json.RawMessage) string {
+	switch method {
+	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval":
+		return "approval_auto_approved"
+	case "tool/requestUserInput", "item/tool/requestUserInput":
+		return "turn_input_required"
+	case "mcpServer/elicitation/request":
+		if c.shouldAutoApproveMCPToolCall(params) {
+			return "approval_auto_approved"
+		}
+		return "turn_input_required"
+	case "turn/completed":
+		res := c.turnCompletion(params)
+		if res.Completed {
+			return "turn_completed"
+		}
+		if res.Err != nil && strings.Contains(res.Err.Error(), "turn_cancelled") {
+			return "turn_cancelled"
+		}
+		return "turn_failed"
+	case "item/tool/call":
+		return "tool_call"
+	default:
+		return strings.ReplaceAll(method, "/", "_")
+	}
+}
+
+func (c *appServerClient) emit(typeName, message string, usage domain.TokenUsage, rateLimits map[string]any) {
+	if usage.TotalTokens != 0 {
+		c.mu.Lock()
+		c.usage = usage
+		c.mu.Unlock()
+	}
+	sessionID, threadID, turnID := c.currentIdentity()
+	select {
+	case c.events <- agent.Event{SessionID: sessionID, ThreadID: threadID, TurnID: turnID, IssueID: c.req.Issue.ID, Type: typeName, Message: message, Usage: usage, RateLimits: rateLimits, At: time.Now()}:
+	case <-c.ctx.Done():
+	}
+}
+
+func (c *appServerClient) result(err error, completed bool) agent.Result {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return agent.Result{
+		SessionID: c.sessionID,
+		ThreadID:  c.threadID,
+		TurnID:    c.turnID,
+		Usage:     c.usage,
+		Err:       err,
+		Completed: completed,
+	}
+}
+
+func (c *appServerClient) setTurn(threadID, turnID string) {
+	c.setObservedIDs(threadID, turnID)
+}
+
+func (c *appServerClient) prepareTurn(threadID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.threadID = threadID
+	c.turnID = ""
+	c.started = false
+	c.turnDone = make(chan turnResult, 1)
+}
+
+func (c *appServerClient) observeResponse(result json.RawMessage) {
+	threadID := nestedID(result, "thread")
+	turnID := nestedID(result, "turn")
+	c.setObservedIDs(threadID, turnID)
+}
+
+func (c *appServerClient) updateSessionFromParams(params json.RawMessage) {
+	var root map[string]any
+	if err := json.Unmarshal(params, &root); err != nil {
+		return
+	}
+	threadID := strValue(root["threadId"])
+	if threadID == "" {
+		thread, _ := root["thread"].(map[string]any)
+		threadID = strValue(thread["id"])
+	}
+	turnID := strValue(root["turnId"])
+	if turnID == "" {
+		turn, _ := root["turn"].(map[string]any)
+		turnID = strValue(turn["id"])
+	}
+	if threadID == "" && turnID == "" {
+		return
+	}
+	c.setObservedIDs(threadID, turnID)
+}
+
+func (c *appServerClient) setObservedIDs(threadID, turnID string) {
+	started := false
+	c.mu.Lock()
+	if threadID != "" {
+		c.threadID = threadID
+	}
+	if turnID != "" {
+		c.turnID = turnID
+	}
+	if c.threadID != "" && c.turnID != "" {
+		c.sessionID = c.threadID + "-" + c.turnID
+		if !c.started {
+			c.started = true
+			started = true
+		}
+	}
+	c.mu.Unlock()
+	if started {
+		c.emit("session_started", "turn started", domain.TokenUsage{}, nil)
+	}
+}
+
+func (c *appServerClient) currentIdentity() (string, string, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessionID, c.threadID, c.turnID
+}
+
+func (c *appServerClient) currentTurnID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.turnID
+}
+
+func (c *appServerClient) nextRequestID() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	id := c.nextID
+	c.nextID++
+	return id
+}
+
+func (c *appServerClient) resolvePending(msg rpcMessage) {
+	key := string(msg.ID)
+	c.mu.Lock()
+	ch := c.pending[key]
+	delete(c.pending, key)
+	c.mu.Unlock()
+	if ch != nil {
+		ch <- msg
+	}
+}
+
+func (c *appServerClient) deletePending(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.pending, key)
+}
+
+func (c *appServerClient) failPending(err error) {
+	c.mu.Lock()
+	pending := c.pending
+	c.pending = map[string]chan rpcMessage{}
+	c.mu.Unlock()
+	msg := rpcMessage{Error: &rpcError{Code: -32000, Message: err.Error()}}
+	for _, ch := range pending {
+		ch <- msg
+	}
+}
+
+func (c *appServerClient) finishTurn(res turnResult) {
+	if res.Err == nil && !res.Completed {
+		return
+	}
+	select {
+	case c.turnDone <- res:
+	default:
+	}
+}
+
+func nestedID(raw json.RawMessage, key string) string {
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return ""
+	}
+	child, _ := root[key].(map[string]any)
+	id, _ := child["id"].(string)
+	return id
+}
+
+func policyMap(policy any) map[string]any {
+	if policy == nil {
+		return nil
+	}
+	if m, ok := policy.(map[string]any); ok {
+		return m
+	}
+	return nil
+}
+
+func rawParamField(params json.RawMessage, key string, fallback any) any {
+	var root map[string]any
+	if err := json.Unmarshal(params, &root); err != nil {
+		return fallback
+	}
+	if v, ok := root[key]; ok {
+		return v
+	}
+	return fallback
+}
+
+func stringSliceField(v any, key string) ([]string, bool) {
+	root, ok := v.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	raw, ok := root[key].([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		s, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, s)
+	}
+	return out, true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func strValue(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func extractThreadTurnID(line string) (string, string) {
@@ -181,19 +767,15 @@ func extractThreadTurnID(line string) (string, string) {
 	if err := json.Unmarshal([]byte(line), &m); err != nil {
 		return "", ""
 	}
-	tid := strField(m, "thread_id", "threadId", "thread.id")
-	turn := strField(m, "turn_id", "turnId", "turn.id")
-	if tid == "" {
-		if inner, ok := m["identity"].(map[string]any); ok {
-			tid = strField(inner, "thread_id", "threadId", "id")
-		}
+	params, _ := m["params"].(map[string]any)
+	threadID, _ := params["threadId"].(string)
+	turn, _ := params["turn"].(map[string]any)
+	turnID, _ := turn["id"].(string)
+	if threadID == "" {
+		thread, _ := params["thread"].(map[string]any)
+		threadID, _ = thread["id"].(string)
 	}
-	if turn == "" {
-		if inner, ok := m["identity"].(map[string]any); ok {
-			turn = strField(inner, "turn_id", "turnId", "id")
-		}
-	}
-	return tid, turn
+	return threadID, turnID
 }
 
 func strField(m map[string]any, keys ...string) string {

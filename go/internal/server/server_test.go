@@ -94,6 +94,9 @@ func TestIssueDetail(t *testing.T) {
 	if running["last_event"] != "notification" || running["last_message"] != "Working on tests" {
 		t.Fatalf("unexpected running event detail: %#v", running)
 	}
+	if running["session_id"] != "thread-1-turn-1" || running["thread_id"] != "thread-1" || running["turn_id"] != "turn-1" {
+		t.Fatalf("unexpected running identity: %#v", running)
+	}
 	if workspace, ok := body["workspace"].(map[string]any); !ok || workspace["path"] == "" {
 		t.Fatalf("missing workspace detail: %#v", body["workspace"])
 	}
@@ -154,7 +157,9 @@ type blockingRunner struct {
 
 func (r *blockingRunner) Run(ctx context.Context, req agent.RunRequest, events chan<- agent.Event) agent.Result {
 	events <- agent.Event{
-		SessionID: req.SessionID,
+		SessionID: "thread-1-turn-1",
+		ThreadID:  "thread-1",
+		TurnID:    "turn-1",
 		IssueID:   req.Issue.ID,
 		Type:      "notification",
 		Message:   "Working on tests",

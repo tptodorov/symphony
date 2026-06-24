@@ -194,7 +194,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	o.updateAttempt(issue.ID, issue.Identifier, attempt, ws.Path, string(domain.RunAttemptStreaming), nil)
 	go func() {
 		start := time.Now()
-		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL, TrackerBDCommand: cfg.TrackerBDCommand, TrackerEndpoint: cfg.TrackerEndpoint, TrackerAPIKey: cfg.TrackerAPIKey}, ch)
+		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), ReadTimeout: agentReadTimeout(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL, TrackerBDCommand: cfg.TrackerBDCommand, TrackerEndpoint: cfg.TrackerEndpoint, TrackerAPIKey: cfg.TrackerAPIKey}, ch)
 		close(ch)
 		if cfg.Hooks.AfterRun != "" {
 			_ = workspace.RunHook(context.Background(), cfg.Hooks.AfterRun, ws.Path, cfg.Hooks.Timeout)
@@ -203,6 +203,12 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 			o.mu.Lock()
 			if r, ok := o.running[issue.ID]; ok {
 				r.sessionID = res.SessionID
+				if res.ThreadID != "" {
+					r.threadID = res.ThreadID
+				}
+				if res.TurnID != "" {
+					r.turnID = res.TurnID
+				}
 				o.running[issue.ID] = r
 			}
 			o.mu.Unlock()
@@ -224,6 +230,13 @@ func agentTurnTimeout(cfg config.Effective) time.Duration {
 		return cfg.Pi.TurnTimeout
 	}
 	return cfg.Codex.TurnTimeout
+}
+
+func agentReadTimeout(cfg config.Effective) time.Duration {
+	if cfg.AgentKind == "pi" {
+		return cfg.Pi.ReadTimeout
+	}
+	return cfg.Codex.ReadTimeout
 }
 
 func agentPolicy(cfg config.Effective) any {
@@ -351,6 +364,15 @@ func (o *Orchestrator) forwardEvents(ch <-chan agent.Event) {
 		o.mu.Lock()
 		o.events = append(o.events, ev)
 		if r := o.running[ev.IssueID]; r.sessionID != "" {
+			if ev.SessionID != "" {
+				r.sessionID = ev.SessionID
+			}
+			if ev.ThreadID != "" {
+				r.threadID = ev.ThreadID
+			}
+			if ev.TurnID != "" {
+				r.turnID = ev.TurnID
+			}
 			r.lastEvent = ev.At
 			r.lastEventType = ev.Type
 			r.lastMessage = ev.Message
@@ -554,6 +576,7 @@ func (o *Orchestrator) IssueSnapshot(identifier string) (IssueDetailSnapshot, bo
 func (o *Orchestrator) runningSnapshotLocked(r running) RunningSnapshot {
 	sn := RunningSnapshot{
 		IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, SessionID: r.sessionID,
+		ThreadID: r.threadID, TurnID: r.turnID,
 		Workspace: r.workspace, TurnCount: r.turnCount, State: r.issue.State, Status: r.status,
 		LastEvent: r.lastEventType, LastMessage: r.lastMessage, StartedAt: &r.started, LastEventAt: &r.lastEvent,
 	}

@@ -20,6 +20,8 @@ type RunningSnapshot struct {
 	IssueIdentifier string             `json:"issue_identifier,omitempty"`
 	IssueURL        *string            `json:"issue_url,omitempty"`
 	SessionID       string             `json:"session_id,omitempty"`
+	ThreadID        string             `json:"thread_id,omitempty"`
+	TurnID          string             `json:"turn_id,omitempty"`
 	TurnCount       int                `json:"turn_count,omitempty"`
 	State           string             `json:"state,omitempty"`
 	Status          string             `json:"status,omitempty"`
