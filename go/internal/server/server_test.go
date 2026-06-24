@@ -34,6 +34,15 @@ func TestState(t *testing.T) {
 	if _, ok := body["retrying"]; !ok {
 		t.Fatal("state response missing retrying")
 	}
+	if _, ok := body["ready"]; !ok {
+		t.Fatal("state response missing ready")
+	}
+	if _, ok := body["setup"]; !ok {
+		t.Fatal("state response missing setup")
+	}
+	if counts, ok := body["counts"].(map[string]any); !ok || counts["ready"] == nil || counts["setup"] == nil {
+		t.Fatalf("state response missing ready/setup count: %#v", body["counts"])
+	}
 	if totals, ok := body["agent_totals"].(map[string]any); !ok || totals["total_tokens"] == nil {
 		t.Fatalf("state response missing snake_case agent_totals: %#v", body["agent_totals"])
 	}
@@ -145,8 +154,16 @@ func TestDashboardUsesStateAPI(t *testing.T) {
 		t.Fatal(rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "Running Sessions") || !strings.Contains(body, "/api/v1/state") || !strings.Contains(body, "recent_agent_messages") || !strings.Contains(body, "log_path") || !strings.Contains(body, "chat-bubble") || !strings.Contains(body, "renderChatText") || !strings.Contains(body, "scrollTailLogs") {
-		t.Fatalf("dashboard does not render status surface: %s", body)
+	for _, want := range []string{"Queued Work", "Running Sessions", "Ready", "Setting up", "/api/v1/state"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "{label:'Session'") {
+		t.Fatalf("dashboard should not show session as a running-session column: %s", body)
+	}
+	if strings.Contains(body, "Log / Workspace") || strings.Contains(body, "renderLogWorkspace") || strings.Contains(body, "col-paths") {
+		t.Fatalf("dashboard should not show log/workspace as a running-session column: %s", body)
 	}
 }
 

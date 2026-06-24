@@ -31,6 +31,8 @@ type Orchestrator struct {
 	completed  map[string]time.Time
 	cancelled  map[string]cancellationReason
 	retries    map[string]retryItem
+	readyQueue []domain.Issue
+	setup      map[string]SetupSnapshot
 	events     []agent.Event
 	totals     domain.AgentTotals
 	rateLimits map[string]any
@@ -44,7 +46,7 @@ func New(cfg config.Effective, tr tracker.Tracker, runner agent.Runner, wm works
 }
 
 func NewWithLogger(cfg config.Effective, tr tracker.Tracker, runner agent.Runner, wm workspace.Manager, log *slog.Logger) *Orchestrator {
-	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]cancellationReason{}, retries: map[string]retryItem{}, rateLimits: nil, runHistory: map[string][]domain.RunAttempt{}, log: log}
+	return &Orchestrator{cfg: cfg, tracker: tr, runner: runner, workspaces: wm, running: map[string]running{}, claimed: map[string]domain.Issue{}, attempts: map[string]int{}, completed: map[string]time.Time{}, cancelled: map[string]cancellationReason{}, retries: map[string]retryItem{}, setup: map[string]SetupSnapshot{}, rateLimits: nil, runHistory: map[string][]domain.RunAttempt{}, log: log}
 }
 
 func (o *Orchestrator) UpdateConfig(cfg config.Effective) { o.mu.Lock(); o.cfg = cfg; o.mu.Unlock() }
@@ -130,6 +132,7 @@ func (o *Orchestrator) Tick(ctx context.Context) error {
 			return err
 		}
 	}
+	o.updateReadyQueue(issues)
 	return nil
 }
 
@@ -146,43 +149,93 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 
 	started := time.Now()
 	o.recordAttempt(issue.ID, issue.Identifier, attempt, "", started, string(domain.RunAttemptPreparingWorkspace), nil)
-	if err := o.workspaces.CleanupPreparationDirs(workspace.PreparationRetention); err != nil && o.log != nil {
-		o.log.Warn("workspace preparation cleanup failed", "error", err)
+	setupStage, setupHook := "preparing_workspace", ""
+	if cfg.Hooks.AfterCreate != "" {
+		setupStage, setupHook = "after_create", "after_create"
 	}
-	ws, _, err := o.workspaces.PrepareForIssue(ctx, issue.Identifier, cfg.Hooks.AfterCreate, cfg.Hooks.Timeout)
+	o.recordSetup(issue, attempt, setupStage, "running", setupHook, "", "", "", nil)
+	if o.log != nil {
+		o.log.Info("workspace preparation started", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace_root", cfg.WorkspaceRoot, "after_create_configured", cfg.Hooks.AfterCreate != "")
+	}
+	if err := o.workspaces.CleanupPreparationDirs(workspace.PreparationRetention); err != nil && o.log != nil {
+		o.log.Warn("workspace preparation cleanup failed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "error", err)
+	}
+	ws, created, err := o.workspaces.PrepareForIssue(ctx, issue.Identifier, cfg.Hooks.AfterCreate, cfg.Hooks.Timeout)
 	if err != nil {
 		var hookErr *workspace.PrepareHookError
 		workspacePath := ""
+		failedWorkspace := ""
+		logs := []LogSnapshot(nil)
 		if errors.As(err, &hookErr) {
 			workspacePath = hookErr.FailedPath
+			failedWorkspace = hookErr.FailedPath
+			if failedWorkspace != "" {
+				prepareErrorPath := filepath.Join(failedWorkspace, "prepare-error.txt")
+				logs = append(logs, LogSnapshot{Label: "prepare-error", Path: prepareErrorPath})
+			}
 			if o.log != nil {
-				observability.HookFailure(o.log, "after_create", err)
+				o.log.Error("workflow hook failed", "hook", "after_create", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "error", err, "failed_workspace", hookErr.FailedPath)
 				o.log.Error("workspace preparation retained failed workspace", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "failed_workspace", hookErr.FailedPath)
 			}
+		} else if o.log != nil {
+			o.log.Error("workspace preparation failed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "error", err)
 		}
+		o.recordSetup(issue, attempt, setupStage, "failed", setupHook, "", failedWorkspace, err.Error(), logs)
 		o.failDispatchAttempt(issue, attempt, workspacePath, err)
 		return nil
 	}
+	if o.log != nil {
+		o.log.Info("workspace preparation completed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path, "created", created)
+		if created && cfg.Hooks.AfterCreate != "" {
+			o.log.Info("workflow hook completed", "hook", "after_create", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path)
+		}
+	}
+	completedStage, completedHook := setupStage, setupHook
+	if !created {
+		completedStage, completedHook = "preparing_workspace", ""
+	}
+	o.recordSetup(issue, attempt, completedStage, "completed", completedHook, ws.Path, "", "", nil)
 	o.updateAttempt(issue.ID, issue.Identifier, attempt, ws.Path, string(domain.RunAttemptPreparingWorkspace), nil)
 	if cfg.Hooks.BeforeRun != "" {
+		o.recordSetup(issue, attempt, "before_run", "running", "before_run", ws.Path, "", "", nil)
+		if o.log != nil {
+			o.log.Info("workflow hook started", "hook", "before_run", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path)
+		}
 		if err := workspace.RunHook(ctx, cfg.Hooks.BeforeRun, ws.Path, cfg.Hooks.Timeout); err != nil {
 			if o.log != nil {
-				observability.HookFailure(o.log, "before_run", err)
+				o.log.Error("workflow hook failed", "hook", "before_run", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path, "error", err)
 			}
+			o.recordSetup(issue, attempt, "before_run", "failed", "before_run", ws.Path, "", err.Error(), nil)
 			o.failDispatchAttempt(issue, attempt, ws.Path, err)
 			return nil
 		}
+		if o.log != nil {
+			o.log.Info("workflow hook completed", "hook", "before_run", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path)
+		}
+		o.recordSetup(issue, attempt, "before_run", "completed", "before_run", ws.Path, "", "", nil)
 	}
 	o.updateAttempt(issue.ID, issue.Identifier, attempt, ws.Path, string(domain.RunAttemptBuildingPrompt), nil)
+	o.recordSetup(issue, attempt, "building_prompt", "running", "", ws.Path, "", "", nil)
+	if o.log != nil {
+		o.log.Info("prompt render started", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path)
+	}
 	var attemptPtr *int
 	if attempt > 0 {
 		attemptPtr = &attempt
 	}
 	p, err := prompt.Render(cfg.PromptTemplate, issue, attemptPtr)
 	if err != nil {
+		if o.log != nil {
+			o.log.Error("prompt render failed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path, "error", err)
+		}
+		o.recordSetup(issue, attempt, "building_prompt", "failed", "", ws.Path, "", err.Error(), nil)
 		o.failDispatchAttempt(issue, attempt, ws.Path, err)
 		return nil
 	}
+	if o.log != nil {
+		o.log.Info("prompt render completed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path)
+	}
+	o.recordSetup(issue, attempt, "building_prompt", "completed", "", ws.Path, "", "", nil)
 	if cfg.AgentKind == "pi" {
 		p = fmt.Sprintf("%s: %s\n\n%s", issue.Identifier, issue.Title, p)
 	}
@@ -318,6 +371,60 @@ func (o *Orchestrator) releaseClaim(id string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	delete(o.claimed, id)
+}
+
+func (o *Orchestrator) updateReadyQueue(issues []domain.Issue) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	cfg := o.cfg
+	ready := make([]domain.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if !domain.IssueIsEligible(issue, cfg) || !o.shouldDispatchCompletedLocked(issue) {
+			continue
+		}
+		if o.running[issue.ID].sessionID != "" || o.claimed[issue.ID].ID != "" {
+			continue
+		}
+		if _, ok := o.retries[issue.ID]; ok {
+			continue
+		}
+		ready = append(ready, issue)
+	}
+	o.readyQueue = ready
+}
+
+func (o *Orchestrator) recordSetup(issue domain.Issue, attempt int, stage, status, hook, workspacePath, failedWorkspace, errText string, logs []LogSnapshot) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	now := time.Now()
+	startedAt := &now
+	if previous, ok := o.setup[issue.ID]; ok && previous.StartedAt != nil {
+		startedAt = previous.StartedAt
+	}
+	sn := SetupSnapshot{
+		IssueID:         issue.ID,
+		IssueIdentifier: issue.Identifier,
+		Title:           issue.Title,
+		State:           issue.State,
+		Attempt:         attempt,
+		Stage:           stage,
+		Status:          status,
+		Hook:            hook,
+		Workspace:       workspacePath,
+		FailedWorkspace: failedWorkspace,
+		Error:           errText,
+		Logs:            append([]LogSnapshot(nil), logs...),
+		StartedAt:       startedAt,
+		UpdatedAt:       now,
+	}
+	if issue.URL != nil {
+		url := *issue.URL
+		sn.IssueURL = &url
+	}
+	if len(sn.Logs) > 0 {
+		sn.LogPath = sn.Logs[0].Path
+	}
+	o.setup[issue.ID] = sn
 }
 
 func (o *Orchestrator) failDispatchAttempt(issue domain.Issue, attempt int, workspacePath string, err error) {
@@ -661,17 +768,22 @@ func (o *Orchestrator) cancelAll() {
 func (o *Orchestrator) Snapshot() Snapshot {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	setupRows := o.visibleSetupLocked()
 	s := Snapshot{
 		GeneratedAt: time.Now(),
-		Counts:      map[string]int{"running": len(o.running), "retrying": len(o.retries), "completed": len(o.completed)},
+		Counts:      map[string]int{"ready": len(o.readyQueue), "setup": len(setupRows), "running": len(o.running), "retrying": len(o.retries), "completed": len(o.completed)},
 		AgentTotals: &o.totals,
 		RateLimits:  o.rateLimits,
 	}
+	for _, issue := range o.readyQueue {
+		s.Ready = append(s.Ready, issueQueueSnapshot(issue))
+	}
+	s.Setup = setupRows
 	for _, r := range o.running {
 		s.Running = append(s.Running, o.runningSnapshotLocked(r))
 	}
 	for _, r := range o.retries {
-		s.Retrying = append(s.Retrying, retrySnapshot(r))
+		s.Retrying = append(s.Retrying, o.retrySnapshotLocked(r))
 	}
 	s.RetryQueue = append([]RetrySnapshot(nil), s.Retrying...)
 	return s
@@ -688,8 +800,13 @@ func (o *Orchestrator) IssueSnapshot(identifier string) (IssueDetailSnapshot, bo
 	}
 	for _, r := range o.retries {
 		if r.issue.Identifier == identifier {
-			sn := retrySnapshot(r)
+			sn := o.retrySnapshotLocked(r)
 			return o.issueDetailLocked(r.issue, "retrying", nil, &sn), true
+		}
+	}
+	for _, setup := range o.visibleSetupLocked() {
+		if setup.IssueIdentifier == identifier {
+			return o.issueDetailLocked(issueFromSetup(setup), "setup", nil, nil), true
 		}
 	}
 	return IssueDetailSnapshot{}, false
@@ -700,7 +817,7 @@ func (o *Orchestrator) runningSnapshotLocked(r running) RunningSnapshot {
 	sn := RunningSnapshot{
 		IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, SessionID: r.sessionID,
 		ThreadID: r.threadID, TurnID: r.turnID,
-		Workspace: r.workspace, TurnCount: r.turnCount, State: r.issue.State, Status: r.status,
+		Title: r.issue.Title, Workspace: r.workspace, TurnCount: r.turnCount, State: r.issue.State, Status: r.status,
 		LastEvent: r.lastEventType, LastMessage: r.lastMessage, LogPath: r.logs.Protocol,
 		RecentAgentMessages: append([]AgentTextMessage(nil), r.agentTextTail...),
 		StartedAt:           &r.started, LastEventAt: &r.lastEvent,
@@ -724,6 +841,19 @@ func (o *Orchestrator) runningSnapshotLocked(r running) RunningSnapshot {
 	if attempts.RestartCount != 0 || attempts.CurrentRetryAttempt != 0 {
 		sn.Attempts = &attempts
 	}
+	sn.Setup = o.setupSnapshotLocked(r.issue.ID)
+	return sn
+}
+
+func issueQueueSnapshot(issue domain.Issue) IssueQueueSnapshot {
+	sn := IssueQueueSnapshot{
+		IssueID: issue.ID, IssueIdentifier: issue.Identifier, Title: issue.Title, State: issue.State,
+		Priority: issue.Priority,
+	}
+	if issue.URL != nil {
+		url := *issue.URL
+		sn.IssueURL = &url
+	}
 	return sn
 }
 
@@ -735,13 +865,14 @@ func (o *Orchestrator) attemptsSnapshotLocked(issueID string) AttemptsSnapshot {
 	return AttemptsSnapshot{RestartCount: attempt - 1, CurrentRetryAttempt: attempt}
 }
 
-func retrySnapshot(r retryItem) RetrySnapshot {
+func (o *Orchestrator) retrySnapshotLocked(r retryItem) RetrySnapshot {
 	due := r.at
 	sn := RetrySnapshot{IssueID: r.issue.ID, IssueIdentifier: r.issue.Identifier, Attempt: r.attempt, DueAt: r.at, At: &due, Error: r.err}
 	if r.issue.URL != nil {
 		url := *r.issue.URL
 		sn.IssueURL = &url
 	}
+	sn.Setup = o.setupSnapshotLocked(r.issue.ID)
 	return sn
 }
 
@@ -761,7 +892,42 @@ func (o *Orchestrator) issueDetailLocked(issue domain.Issue, status string, runn
 		RecentAgentMessages: o.recentAgentMessagesLocked(issue.ID, 100),
 		RecentEvents:        o.recentEventsLocked(issue.ID, 20),
 		LastError:           lastError,
+		Setup:               o.setupSnapshotLocked(issue.ID),
 		Tracked:             trackedIssue(issue),
+	}
+}
+
+func (o *Orchestrator) visibleSetupLocked() []SetupSnapshot {
+	rows := []SetupSnapshot{}
+	for id, setup := range o.setup {
+		if setup.Status != "running" && setup.Status != "failed" {
+			continue
+		}
+		if r := o.running[id]; r.sessionID != "" && setup.Status != "failed" {
+			continue
+		}
+		rows = append(rows, setup)
+	}
+	return rows
+}
+
+func (o *Orchestrator) setupSnapshotLocked(issueID string) *SetupSnapshot {
+	setup, ok := o.setup[issueID]
+	if !ok {
+		return nil
+	}
+	cp := setup
+	cp.Logs = append([]LogSnapshot(nil), setup.Logs...)
+	return &cp
+}
+
+func issueFromSetup(setup SetupSnapshot) domain.Issue {
+	return domain.Issue{
+		ID:         setup.IssueID,
+		Identifier: setup.IssueIdentifier,
+		Title:      setup.Title,
+		State:      setup.State,
+		URL:        setup.IssueURL,
 	}
 }
 

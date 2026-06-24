@@ -1,8 +1,10 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	agentfake "github.com/openai/symphony/go/internal/agent/fake"
 	"github.com/openai/symphony/go/internal/config"
 	"github.com/openai/symphony/go/internal/domain"
+	"github.com/openai/symphony/go/internal/observability"
 	trackerfake "github.com/openai/symphony/go/internal/tracker/fake"
 	"github.com/openai/symphony/go/internal/workspace"
 )
@@ -32,6 +35,47 @@ func TestDispatch(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if r.Count() != 1 {
 		t.Fatalf("runs=%d", r.Count())
+	}
+}
+
+func TestReadyQueueSnapshotUsesDispatchOrder(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TrackerKind = "linear"
+	cfg.ActiveStates = []string{"Todo"}
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.Agent.MaxConcurrentAgents = 1
+	p1, p2, p3 := 1, 2, 3
+	u2 := "https://tracker.example/A-2"
+	issues := []domain.Issue{
+		{ID: "3", Identifier: "A-3", Title: "Third", State: "Todo", Priority: &p3},
+		{ID: "1", Identifier: "A-1", Title: "First", State: "Todo", Priority: &p1},
+		{ID: "2", Identifier: "A-2", Title: "Second", State: "Todo", Priority: &p2, URL: &u2},
+	}
+	tr := &trackerfake.Tracker{Issues: issues}
+	runner := &queueBlockingRunner{started: make(chan struct{}), release: make(chan struct{})}
+	o := New(cfg, tr, runner, workspace.NewManager(cfg.WorkspaceRoot))
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	defer close(runner.release)
+
+	sn := o.Snapshot()
+	if sn.Counts["running"] != 1 || len(sn.Running) != 1 || sn.Running[0].IssueIdentifier != "A-1" {
+		t.Fatalf("running snapshot = %+v counts=%+v", sn.Running, sn.Counts)
+	}
+	if sn.Counts["ready"] != 2 || len(sn.Ready) != 2 {
+		t.Fatalf("ready snapshot = %+v counts=%+v", sn.Ready, sn.Counts)
+	}
+	if sn.Ready[0].IssueIdentifier != "A-2" || sn.Ready[1].IssueIdentifier != "A-3" {
+		t.Fatalf("ready queue order = %+v", sn.Ready)
+	}
+	if sn.Ready[0].IssueURL == nil || *sn.Ready[0].IssueURL != u2 || sn.Ready[0].Title != "Second" {
+		t.Fatalf("ready row details = %+v", sn.Ready[0])
 	}
 }
 
@@ -187,9 +231,79 @@ func TestAgentTextTailUsesCodexItemBoundaries(t *testing.T) {
 	}
 }
 
+type queueBlockingRunner struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *queueBlockingRunner) Run(ctx context.Context, req agent.RunRequest, events chan<- agent.Event) agent.Result {
+	close(r.started)
+	select {
+	case <-r.release:
+		return agent.Result{SessionID: req.SessionID, Completed: false, Err: errors.New("released")}
+	case <-ctx.Done():
+		return agent.Result{SessionID: req.SessionID, Completed: false, Err: ctx.Err()}
+	}
+}
+
 func TestBackoff(t *testing.T) {
 	if got := backoff(3, 30*time.Second); got != 30*time.Second {
 		t.Fatal(got)
+	}
+}
+
+func TestSetupSnapshotVisibleDuringWorkspacePreparation(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TrackerKind = "linear"
+	cfg.ActiveStates = []string{"Todo"}
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.Agent.MaxConcurrentAgents = 1
+	tmp := t.TempDir()
+	started := filepath.Join(tmp, "started")
+	release := filepath.Join(tmp, "release")
+	cfg.Hooks.AfterCreate = fmt.Sprintf("touch %q; while [ ! -f %q ]; do sleep 0.01; done", started, release)
+	tr := &trackerfake.Tracker{Issues: []domain.Issue{{ID: "1", Identifier: "A-1", Title: "Prepare workspace", State: "Todo"}}}
+	runner := &queueBlockingRunner{started: make(chan struct{}), release: make(chan struct{})}
+	o := New(cfg, tr, runner, workspace.NewManager(cfg.WorkspaceRoot))
+
+	done := make(chan error, 1)
+	go func() { done <- o.Tick(context.Background()) }()
+	waitFor(t, time.Second, func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	})
+
+	sn := o.Snapshot()
+	if sn.Counts["setup"] != 1 || len(sn.Setup) != 1 {
+		t.Fatalf("setup snapshot missing while hook runs: counts=%+v setup=%+v", sn.Counts, sn.Setup)
+	}
+	setup := sn.Setup[0]
+	if setup.IssueIdentifier != "A-1" || setup.Title != "Prepare workspace" || setup.Stage != "after_create" || setup.Status != "running" || setup.Hook != "after_create" {
+		t.Fatalf("unexpected setup snapshot: %+v", setup)
+	}
+	if setup.Workspace != "" {
+		t.Fatalf("setup workspace should not be guessed before preparation returns: %+v", setup)
+	}
+	if len(sn.Running) != 0 {
+		t.Fatalf("agent should not be running while workspace hook is blocked: %+v", sn.Running)
+	}
+
+	if err := os.WriteFile(release, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start after setup released")
+	}
+	close(runner.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tick did not finish")
 	}
 }
 
@@ -202,7 +316,8 @@ func TestDispatchPreparationFailureSchedulesRetry(t *testing.T) {
 	cfg.Hooks.AfterCreate = "exit 2"
 	tr := &trackerfake.Tracker{Issues: []domain.Issue{{ID: "1", Identifier: "A-1", Title: "T", State: "Todo"}}}
 	r := &agentfake.Runner{}
-	o := New(cfg, tr, r, workspace.NewManager(cfg.WorkspaceRoot))
+	var logs bytes.Buffer
+	o := NewWithLogger(cfg, tr, r, workspace.NewManager(cfg.WorkspaceRoot), observability.NewLogger(&logs))
 
 	if err := o.Tick(context.Background()); err != nil {
 		t.Fatal(err)
@@ -224,6 +339,17 @@ func TestDispatchPreparationFailureSchedulesRetry(t *testing.T) {
 	if err != nil || len(failed) != 1 {
 		t.Fatalf("failed preparation workspace not retained: %v %#v", err, failed)
 	}
+	if sn.Counts["setup"] != 1 || len(sn.Setup) != 1 {
+		t.Fatalf("failed setup snapshot missing: counts=%+v setup=%+v", sn.Counts, sn.Setup)
+	}
+	setup := sn.Setup[0]
+	prepareErrorPath := filepath.Join(failed[0], "prepare-error.txt")
+	if setup.Stage != "after_create" || setup.Status != "failed" || setup.Hook != "after_create" || setup.FailedWorkspace != failed[0] || setup.LogPath != prepareErrorPath || !strings.Contains(setup.Error, "hook failed") {
+		t.Fatalf("unexpected failed setup snapshot: %+v", setup)
+	}
+	if sn.Retrying[0].Setup == nil || sn.Retrying[0].Setup.FailedWorkspace != failed[0] || sn.Retrying[0].Setup.LogPath != prepareErrorPath {
+		t.Fatalf("retry row missing setup details: %+v", sn.Retrying[0])
+	}
 	o.mu.Lock()
 	hist := append([]domain.RunAttempt(nil), o.runHistory["1"]...)
 	attempt := o.attempts["1"]
@@ -233,6 +359,18 @@ func TestDispatchPreparationFailureSchedulesRetry(t *testing.T) {
 	}
 	if hist[0].WorkspacePath != failed[0] {
 		t.Fatalf("history should point at retained failed workspace: %+v failed=%s", hist[0], failed[0])
+	}
+	logText := logs.String()
+	for _, want := range []string{
+		`"msg":"workspace preparation started"`,
+		`"msg":"workflow hook failed"`,
+		`"hook":"after_create"`,
+		`"msg":"workspace preparation retained failed workspace"`,
+		`"failed_workspace":"` + failed[0] + `"`,
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("setup log missing %q in logs:\n%s", want, logText)
+		}
 	}
 
 	if err := o.Tick(context.Background()); err != nil {
@@ -244,6 +382,18 @@ func TestDispatchPreparationFailureSchedulesRetry(t *testing.T) {
 	if got := o.Snapshot().Counts["retrying"]; got != 1 {
 		t.Fatalf("retry should remain queued, got %d", got)
 	}
+}
+
+func waitFor(t *testing.T, timeout time.Duration, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition was not met before timeout")
 }
 
 func TestStallCancellationRecordsStalledRetry(t *testing.T) {

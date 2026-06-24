@@ -7,18 +7,29 @@ import (
 )
 
 type Snapshot struct {
-	GeneratedAt time.Time           `json:"generated_at"`
-	Running     []RunningSnapshot   `json:"running"`
-	Retrying    []RetrySnapshot     `json:"retrying"`
-	RetryQueue  []RetrySnapshot     `json:"retry_queue,omitempty"`
-	Counts      map[string]int      `json:"counts"`
-	AgentTotals *domain.AgentTotals `json:"agent_totals,omitempty"`
-	RateLimits  map[string]any      `json:"rate_limits,omitempty"`
+	GeneratedAt time.Time            `json:"generated_at"`
+	Ready       []IssueQueueSnapshot `json:"ready"`
+	Setup       []SetupSnapshot      `json:"setup"`
+	Running     []RunningSnapshot    `json:"running"`
+	Retrying    []RetrySnapshot      `json:"retrying"`
+	RetryQueue  []RetrySnapshot      `json:"retry_queue,omitempty"`
+	Counts      map[string]int       `json:"counts"`
+	AgentTotals *domain.AgentTotals  `json:"agent_totals,omitempty"`
+	RateLimits  map[string]any       `json:"rate_limits,omitempty"`
+}
+type IssueQueueSnapshot struct {
+	IssueID         string  `json:"issue_id"`
+	IssueIdentifier string  `json:"issue_identifier"`
+	IssueURL        *string `json:"issue_url,omitempty"`
+	Title           string  `json:"title,omitempty"`
+	State           string  `json:"state,omitempty"`
+	Priority        *int    `json:"priority,omitempty"`
 }
 type RunningSnapshot struct {
 	IssueID             string             `json:"issue_id,omitempty"`
 	IssueIdentifier     string             `json:"issue_identifier,omitempty"`
 	IssueURL            *string            `json:"issue_url,omitempty"`
+	Title               string             `json:"title,omitempty"`
 	SessionID           string             `json:"session_id,omitempty"`
 	ThreadID            string             `json:"thread_id,omitempty"`
 	TurnID              string             `json:"turn_id,omitempty"`
@@ -36,19 +47,21 @@ type RunningSnapshot struct {
 	LastEventAt         *time.Time         `json:"last_event_at,omitempty"`
 	Tokens              *domain.TokenUsage `json:"tokens,omitempty"`
 	Attempts            *AttemptsSnapshot  `json:"attempts,omitempty"`
+	Setup               *SetupSnapshot     `json:"setup,omitempty"`
 }
 type AttemptsSnapshot struct {
 	RestartCount        int `json:"restart_count,omitempty"`
 	CurrentRetryAttempt int `json:"current_retry_attempt,omitempty"`
 }
 type RetrySnapshot struct {
-	IssueID         string     `json:"issue_id"`
-	IssueIdentifier string     `json:"issue_identifier"`
-	IssueURL        *string    `json:"issue_url,omitempty"`
-	Attempt         int        `json:"attempt"`
-	DueAt           time.Time  `json:"due_at"`
-	At              *time.Time `json:"at,omitempty"`
-	Error           string     `json:"error,omitempty"`
+	IssueID         string         `json:"issue_id"`
+	IssueIdentifier string         `json:"issue_identifier"`
+	IssueURL        *string        `json:"issue_url,omitempty"`
+	Attempt         int            `json:"attempt"`
+	DueAt           time.Time      `json:"due_at"`
+	At              *time.Time     `json:"at,omitempty"`
+	Error           string         `json:"error,omitempty"`
+	Setup           *SetupSnapshot `json:"setup,omitempty"`
 }
 
 type IssueDetailSnapshot struct {
@@ -63,7 +76,27 @@ type IssueDetailSnapshot struct {
 	RecentAgentMessages []AgentTextMessage `json:"recent_agent_messages,omitempty"`
 	RecentEvents        []EventSnapshot    `json:"recent_events"`
 	LastError           *string            `json:"last_error"`
+	Setup               *SetupSnapshot     `json:"setup,omitempty"`
 	Tracked             map[string]any     `json:"tracked"`
+}
+
+type SetupSnapshot struct {
+	IssueID         string        `json:"issue_id"`
+	IssueIdentifier string        `json:"issue_identifier"`
+	IssueURL        *string       `json:"issue_url,omitempty"`
+	Title           string        `json:"title,omitempty"`
+	State           string        `json:"state,omitempty"`
+	Attempt         int           `json:"attempt,omitempty"`
+	Stage           string        `json:"stage"`
+	Status          string        `json:"status"`
+	Hook            string        `json:"hook,omitempty"`
+	Workspace       string        `json:"workspace,omitempty"`
+	FailedWorkspace string        `json:"failed_workspace,omitempty"`
+	Error           string        `json:"error,omitempty"`
+	LogPath         string        `json:"log_path,omitempty"`
+	Logs            []LogSnapshot `json:"logs,omitempty"`
+	StartedAt       *time.Time    `json:"started_at,omitempty"`
+	UpdatedAt       time.Time     `json:"updated_at"`
 }
 
 type WorkspaceSnapshot struct {

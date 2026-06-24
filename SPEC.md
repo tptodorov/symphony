@@ -1110,9 +1110,13 @@ Execution contract:
 - On POSIX systems, `sh -lc <script>` (or a stricter equivalent such as `bash -lc <script>`) is a
   conforming default.
 - Hooks inherit the Symphony process environment.
+- Symphony-defined hook environment variables MUST use the `SYMPHONY_` prefix. Implementations MUST
+  NOT synthesize non-`SYMPHONY_` aliases such as `SOURCE_DIR`; workflows that need tool-specific
+  variable names can assign them inside the hook script.
 - `SYMPHONY_WORKDIR` MUST be set to the effective absolute working directory after applying the
   runtime `-workdir` option. Workflows MAY use it to locate the source checkout that owns
   `WORKFLOW.md`.
+- Hook processes MUST receive the same base environment for every supported hook.
 - Hook timeout uses `hooks.timeout_ms`; default: `60000 ms`.
 - Log hook start, failures, and timeouts.
 
@@ -2012,6 +2016,13 @@ The spec does not prescribe where logs are written (stderr, file, remote sink, e
 Requirements:
 
 - Operators MUST be able to see startup/validation/dispatch failures without attaching a debugger.
+- Operators SHOULD be able to see workspace setup failures before the agent starts, including
+  workspace cleanup failures, workspace creation/preparation failures, prompt-render failures, and
+  workflow hook failures.
+- Workflow hook failure logs SHOULD include the hook name, issue identifier, attempt number,
+  workspace path when known, and the error text returned by the hook runner.
+- When a failed `after_create` workspace is retained for inspection, logs SHOULD include the retained
+  failed workspace path.
 - Implementations MAY write to one or more sinks.
 - If a configured log sink fails, the service SHOULD continue running when possible and emit an
   operator-visible warning through any remaining sink.
@@ -2021,10 +2032,25 @@ Requirements:
 If the implementation exposes a synchronous runtime snapshot (for dashboards or monitoring), it
 SHOULD return:
 
+- `ready` (list of current pending work rows from the latest successful tracker poll)
+  - The list SHOULD contain dispatch-eligible tracker candidates that are not currently running,
+    claimed, completed/book-kept, or waiting in retry backoff.
+  - The list order SHOULD match the order the orchestrator will use when selecting the next work,
+    after applying the same dispatch sort used by the scheduler.
+  - Snapshot consumers MAY show only a bounded prefix, but `counts.ready` SHOULD report the full
+    pending ready count.
+- `setup` (list of current or recently failed workspace setup rows)
+  - Rows SHOULD be emitted while a ticket is claimed but not yet running an agent because workspace
+    preparation, workflow hooks, or prompt rendering are in progress.
+  - Rows SHOULD remain visible when setup fails and the issue is moved to retry backoff.
+  - Rows SHOULD include issue identity, title, tracker state, attempt, setup stage, setup status,
+    hook name when relevant, workspace or failed workspace path when known, setup error text when
+    present, and setup diagnostic log paths when available.
 - `running` (list of running session rows)
 - each running row SHOULD include `turn_count`
 - `retrying` (list of retry queue rows)
-- session and retry rows SHOULD include the tracker-provided issue URL when available
+- retry rows SHOULD include the latest setup snapshot when the retry was caused by setup failure.
+- ready, session, and retry rows SHOULD include the tracker-provided issue URL when available
 - `agent_totals`
   - `input_tokens`
   - `output_tokens`
@@ -2124,8 +2150,20 @@ Enablement (extension):
 - Host a human-readable dashboard at `/`.
 - The returned document SHOULD depict the current state of the system (for example active sessions,
   retry delays, token consumption, runtime totals, recent events, and health/error indicators).
+- The dashboard SHOULD expose the current pending ready-work count before the running count.
+- The dashboard SHOULD include a Queued Work or equivalent section above Running Sessions.
+  - The queued section SHOULD show the next pending ready issues in the same order the scheduler uses
+    for selecting work.
+  - Showing the first five pending ready issues is sufficient.
+  - Tracker URLs in the queued section SHOULD be clickable when available.
 - The dashboard SHOULD include a Running Sessions section for currently running jobs.
+  - Tickets whose workspace is being prepared SHOULD be shown in this same section even before an
+    agent session exists.
+  - Each running job SHOULD show the issue title when available.
   - Each running job SHOULD expose the primary raw agent log path when available.
+  - Workspace paths, setup diagnostic log paths, and raw agent log paths SHOULD be shown above the
+    agent text tail inside the ticket's nested session/log window.
+  - Setup status and setup errors SHOULD be shown in the same nested session/log window.
   - Each running job SHOULD show a bounded tail of recent agent text messages so an operator can
     understand what the agent is currently doing without opening raw logs.
   - The text tail SHOULD prefer human-readable agent text extracted from agent protocol events and
@@ -2151,14 +2189,53 @@ Minimum endpoints:
     {
       "generated_at": "2026-02-24T20:15:30Z",
       "counts": {
+        "ready": 1,
+        "setup": 1,
         "running": 2,
         "retrying": 1
       },
+      "ready": [
+        {
+          "issue_id": "ghi789",
+          "issue_identifier": "MT-651",
+          "issue_url": "https://tracker.example/issues/MT-651",
+          "title": "Add queued work visibility",
+          "state": "Todo",
+          "priority": 1
+        }
+      ],
+      "setup": [
+        {
+          "issue_id": "jkl012",
+          "issue_identifier": "MT-652",
+          "issue_url": "https://tracker.example/issues/MT-652",
+          "title": "Prepare workspace visibility",
+          "state": "In Progress",
+          "attempt": 0,
+          "stage": "after_create",
+          "status": "failed",
+          "hook": "after_create",
+          "workspace": "/tmp/symphony_workspaces/MT-652",
+          "failed_workspace": "/tmp/symphony_workspaces/.failed/MT-652-123",
+          "error": "hook failed: exit status 2",
+          "log_path": "/tmp/symphony_workspaces/.failed/MT-652-123/prepare-error.txt",
+          "logs": [
+            {
+              "label": "prepare-error",
+              "path": "/tmp/symphony_workspaces/.failed/MT-652-123/prepare-error.txt",
+              "url": null
+            }
+          ],
+          "started_at": "2026-02-24T20:09:58Z",
+          "updated_at": "2026-02-24T20:10:02Z"
+        }
+      ],
       "running": [
         {
           "issue_id": "abc123",
           "issue_identifier": "MT-649",
           "issue_url": "https://tracker.example/issues/MT-649",
+          "title": "Implement queued work visibility",
           "state": "In Progress",
           "session_id": "thread-1-turn-1",
           "turn_count": 7,
@@ -2178,6 +2255,14 @@ Minimum endpoints:
             "input_tokens": 1200,
             "output_tokens": 800,
             "total_tokens": 2000
+          },
+          "setup": {
+            "issue_id": "abc123",
+            "issue_identifier": "MT-649",
+            "stage": "building_prompt",
+            "status": "completed",
+            "workspace": "/tmp/symphony_workspaces/MT-649",
+            "updated_at": "2026-02-24T20:10:11Z"
           }
         }
       ],
@@ -2188,7 +2273,18 @@ Minimum endpoints:
           "issue_url": "https://tracker.example/issues/MT-650",
           "attempt": 3,
           "due_at": "2026-02-24T20:16:00Z",
-          "error": "no available orchestrator slots"
+          "error": "hook failed: exit status 2",
+          "setup": {
+            "issue_id": "def456",
+            "issue_identifier": "MT-650",
+            "stage": "after_create",
+            "status": "failed",
+            "hook": "after_create",
+            "failed_workspace": "/tmp/symphony_workspaces/.failed/MT-650-123",
+            "error": "hook failed: exit status 2",
+            "log_path": "/tmp/symphony_workspaces/.failed/MT-650-123/prepare-error.txt",
+            "updated_at": "2026-02-24T20:15:10Z"
+          }
         }
       ],
       "agent_totals": {
@@ -2257,6 +2353,14 @@ Minimum endpoints:
         }
       ],
       "last_error": null,
+      "setup": {
+        "issue_id": "abc123",
+        "issue_identifier": "MT-649",
+        "stage": "building_prompt",
+        "status": "completed",
+        "workspace": "/tmp/symphony_workspaces/MT-649",
+        "updated_at": "2026-02-24T20:10:11Z"
+      },
       "tracked": {}
     }
     ```
@@ -2950,6 +3054,8 @@ If `tracker.kind == "jira"` is implemented:
   workflow path
 - CLI exports `SYMPHONY_WORKDIR` as the effective absolute working directory after applying
   `-workdir`
+- CLI-provided hook environment variables use the `SYMPHONY_` prefix; `SYMPHONY_WORKDIR` is the
+  canonical source checkout/workflow working directory variable for hooks.
 - CLI uses `./WORKFLOW.md` in the effective working directory when no workflow path argument is
   provided
 - CLI help shows the positional workflow path form (`[path-to-WORKFLOW.md]`)

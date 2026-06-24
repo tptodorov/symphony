@@ -39,6 +39,16 @@ help with the setup:
 See [examples/WORKFLOW.full.md](examples/WORKFLOW.full.md) for a fully expanded workflow
 configuration with Jira, Linear, Beads, Codex, Pi, hooks, polling, workspace, and server settings.
 
+### Hook environment
+
+Workflow hooks inherit the Symphony process environment. Environment variables added by Symphony use
+the `SYMPHONY_` prefix only.
+
+- `SYMPHONY_WORKDIR`: effective absolute working directory after applying `-workdir`.
+
+If a repository task expects another name, assign it inside the hook script, for example
+`SOURCE_DIR="$SYMPHONY_WORKDIR" task worktree:prepare`.
+
 ---
 
 ## License

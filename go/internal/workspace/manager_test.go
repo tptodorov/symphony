@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,5 +138,23 @@ func TestHook(t *testing.T) {
 	}
 	if err := RunHook(ctx, "sleep 1", t.TempDir(), time.Millisecond); err == nil {
 		t.Fatal("expected timeout")
+	}
+}
+
+func TestHookEnvInheritsSymphonyWorkdirWithoutSourceDirAlias(t *testing.T) {
+	workdir := t.TempDir()
+	out := filepath.Join(t.TempDir(), "hook-env.txt")
+	t.Setenv("SYMPHONY_WORKDIR", workdir)
+	t.Setenv("SOURCE_DIR", "")
+
+	if err := RunHook(context.Background(), fmt.Sprintf("printf '%%s\n%%s\n' \"$SYMPHONY_WORKDIR\" \"$SOURCE_DIR\" > %q", out), t.TempDir(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(b), workdir+"\n\n"; got != want {
+		t.Fatalf("unexpected hook env output: %q", b)
 	}
 }

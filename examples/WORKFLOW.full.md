@@ -65,6 +65,14 @@ workspace:
   root: .symphony/workspaces
 
 hooks:
+  # Hook scripts inherit the Symphony process environment. Variables added by
+  # Symphony itself use the SYMPHONY_ prefix only.
+  #
+  # Provided by Symphony:
+  # - SYMPHONY_WORKDIR: effective absolute working directory after -workdir.
+  #
+  # If a repository task expects a different variable name, assign it here:
+  # SOURCE_DIR="$SYMPHONY_WORKDIR" task worktree:prepare
   timeout_ms: 60000
   after_create: |
     true
