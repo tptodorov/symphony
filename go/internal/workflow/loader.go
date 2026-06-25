@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/openai/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/domain"
 	"gopkg.in/yaml.v3"
 )
 

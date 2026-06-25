@@ -3,7 +3,7 @@ package codex
 import (
 	"encoding/json"
 
-	"github.com/openai/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/domain"
 )
 
 func ExtractUsage(b []byte) domain.TokenUsage {

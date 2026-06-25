@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openai/symphony/go/internal/agent"
-	"github.com/openai/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/agent"
+	"github.com/tptodorov/symphony/go/internal/domain"
 )
 
 func TestRunnerCompletesFakeAppServerTurnAndPassesProtocolConfig(t *testing.T) {

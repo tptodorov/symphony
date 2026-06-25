@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/openai/symphony/go/internal/agent"
+	"github.com/tptodorov/symphony/go/internal/agent"
 )
 
 type Runner struct {

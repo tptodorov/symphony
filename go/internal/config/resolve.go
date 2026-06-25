@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openai/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/domain"
 )
 
 var envRef = regexp.MustCompile(`\$[A-Za-z_][A-Za-z0-9_]*`)

@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/openai/symphony/go/internal/app"
-	"github.com/openai/symphony/go/internal/observability"
+	"github.com/tptodorov/symphony/go/internal/app"
+	"github.com/tptodorov/symphony/go/internal/observability"
 )
 
 func main() {

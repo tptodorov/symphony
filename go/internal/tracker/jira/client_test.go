@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openai/symphony/go/internal/config"
+	"github.com/tptodorov/symphony/go/internal/config"
 )
 
 type capturedRequest struct {

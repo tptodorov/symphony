@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/openai/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/domain"
 )
 
 type Effective = domain.EffectiveConfig

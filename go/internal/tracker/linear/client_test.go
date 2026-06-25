@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/openai/symphony/go/internal/config"
+	"github.com/tptodorov/symphony/go/internal/config"
 )
 
 func TestClient(t *testing.T) {

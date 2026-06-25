@@ -35,7 +35,7 @@
 
 **Steps:**
 
-1. Create `go/go.mod` with module path `github.com/openai/symphony/go`.
+1. Create `go/go.mod` with module path `github.com/tptodorov/symphony/go`.
 2. Add initial dependencies:
    - `gopkg.in/yaml.v3`
    - `github.com/fsnotify/fsnotify`

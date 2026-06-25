@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openai/symphony/go/internal/agent"
-	agentfake "github.com/openai/symphony/go/internal/agent/fake"
-	"github.com/openai/symphony/go/internal/config"
-	"github.com/openai/symphony/go/internal/domain"
-	"github.com/openai/symphony/go/internal/orchestrator"
-	trackerfake "github.com/openai/symphony/go/internal/tracker/fake"
-	"github.com/openai/symphony/go/internal/workspace"
+	"github.com/tptodorov/symphony/go/internal/agent"
+	agentfake "github.com/tptodorov/symphony/go/internal/agent/fake"
+	"github.com/tptodorov/symphony/go/internal/config"
+	"github.com/tptodorov/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/orchestrator"
+	trackerfake "github.com/tptodorov/symphony/go/internal/tracker/fake"
+	"github.com/tptodorov/symphony/go/internal/workspace"
 )
 
 func TestState(t *testing.T) {

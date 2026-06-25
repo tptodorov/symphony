@@ -12,13 +12,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openai/symphony/go/internal/agent"
-	"github.com/openai/symphony/go/internal/config"
-	"github.com/openai/symphony/go/internal/domain"
-	"github.com/openai/symphony/go/internal/observability"
-	"github.com/openai/symphony/go/internal/prompt"
-	"github.com/openai/symphony/go/internal/tracker"
-	"github.com/openai/symphony/go/internal/workspace"
+	"github.com/tptodorov/symphony/go/internal/agent"
+	"github.com/tptodorov/symphony/go/internal/config"
+	"github.com/tptodorov/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/observability"
+	"github.com/tptodorov/symphony/go/internal/prompt"
+	"github.com/tptodorov/symphony/go/internal/tracker"
+	"github.com/tptodorov/symphony/go/internal/workspace"
 )
 
 const promptIncludeMaxBytes = 64 * 1024

@@ -1,4 +1,4 @@
-module github.com/openai/symphony/go
+module github.com/tptodorov/symphony/go
 
 go 1.23
 

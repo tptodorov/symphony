@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openai/symphony/go/internal/agent"
-	"github.com/openai/symphony/go/internal/domain"
-	"github.com/openai/symphony/go/internal/tools"
+	"github.com/tptodorov/symphony/go/internal/agent"
+	"github.com/tptodorov/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/tools"
 )
 
 type Runner struct{ Command string }

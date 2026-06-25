@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	agentfake "github.com/openai/symphony/go/internal/agent/fake"
-	"github.com/openai/symphony/go/internal/config"
-	"github.com/openai/symphony/go/internal/orchestrator"
-	trackerfake "github.com/openai/symphony/go/internal/tracker/fake"
-	"github.com/openai/symphony/go/internal/workspace"
+	agentfake "github.com/tptodorov/symphony/go/internal/agent/fake"
+	"github.com/tptodorov/symphony/go/internal/config"
+	"github.com/tptodorov/symphony/go/internal/orchestrator"
+	trackerfake "github.com/tptodorov/symphony/go/internal/tracker/fake"
+	"github.com/tptodorov/symphony/go/internal/workspace"
 )
 
 func TestNew(t *testing.T) {

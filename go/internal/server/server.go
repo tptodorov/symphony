@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openai/symphony/go/internal/orchestrator"
+	"github.com/tptodorov/symphony/go/internal/orchestrator"
 )
 
 type Server struct{ orch *orchestrator.Orchestrator }

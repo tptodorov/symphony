@@ -3,8 +3,8 @@ package tracker
 import (
 	"context"
 
-	"github.com/openai/symphony/go/internal/config"
-	"github.com/openai/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/config"
+	"github.com/tptodorov/symphony/go/internal/domain"
 )
 
 type Tracker interface {

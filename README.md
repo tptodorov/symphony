@@ -49,6 +49,28 @@ the `SYMPHONY_` prefix only.
 If a repository task expects another name, assign it inside the hook script, for example
 `SOURCE_DIR="$SYMPHONY_WORKDIR" task worktree:prepare`.
 
+## Releasing
+
+Releases use Go module tags and the GitHub CLI. Because the Go module lives in `go/`, tag releases
+as `go/vX.Y.Z`.
+
+```sh
+make release VERSION=0.1.0
+```
+
+Replace `0.1.0` with the version you are releasing. The release target runs `git town sync`, runs
+`make -C go all`, then creates the GitHub Release with:
+
+```sh
+gh release create go/v0.1.0 --repo tptodorov/symphony --target main --generate-notes --fail-on-no-commits
+```
+
+Users install the released CLI with Go:
+
+```sh
+go install github.com/tptodorov/symphony/go/cmd/symphony@v0.1.0
+```
+
 ---
 
 ## License

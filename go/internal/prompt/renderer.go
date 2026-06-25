@@ -5,8 +5,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/openai/symphony/go/internal/domain"
 	"github.com/osteele/liquid"
+	"github.com/tptodorov/symphony/go/internal/domain"
 )
 
 var (
