@@ -154,7 +154,7 @@ func TestDashboardUsesStateAPI(t *testing.T) {
 		t.Fatal(rr.Code)
 	}
 	body := rr.Body.String()
-	for _, want := range []string{"Queued Work", "Running Sessions", "Ready", "Setting up", "/api/v1/state"} {
+	for _, want := range []string{"Queued Work", "Running Sessions", "Ready", "Setting up", "Total tokens", "/api/v1/state"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard missing %q: %s", want, body)
 		}
