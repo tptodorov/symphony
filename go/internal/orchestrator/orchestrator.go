@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/openai/symphony/go/internal/tracker"
 	"github.com/openai/symphony/go/internal/workspace"
 )
+
+const promptIncludeMaxBytes = 64 * 1024
 
 type Orchestrator struct {
 	cfg        config.Effective
@@ -232,6 +236,15 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 		o.failDispatchAttempt(issue, attempt, ws.Path, err)
 		return nil
 	}
+	p, err = appendPromptIncludes(p, ws.Path, cfg.PromptIncludeFiles)
+	if err != nil {
+		if o.log != nil {
+			o.log.Error("prompt include failed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path, "error", err)
+		}
+		o.recordSetup(issue, attempt, "building_prompt", "failed", "", ws.Path, "", err.Error(), nil)
+		o.failDispatchAttempt(issue, attempt, ws.Path, err)
+		return nil
+	}
 	if o.log != nil {
 		o.log.Info("prompt render completed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "attempt", attempt, "workspace", ws.Path)
 	}
@@ -283,6 +296,66 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 		o.workerExit(issue, res, time.Since(start))
 	}()
 	return nil
+}
+
+func appendPromptIncludes(base, workspacePath string, includeFiles []string) (string, error) {
+	if len(includeFiles) == 0 {
+		return base, nil
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	for _, rel := range includeFiles {
+		rel = strings.TrimSpace(rel)
+		if rel == "" {
+			continue
+		}
+		if filepath.IsAbs(rel) {
+			return "", fmt.Errorf("prompt include path must be relative: %s", rel)
+		}
+		path := filepath.Join(workspacePath, rel)
+		if err := workspace.EnsurePathInsideRoot(workspacePath, path); err != nil {
+			return "", fmt.Errorf("prompt include %s: %w", rel, err)
+		}
+		text, truncated, err := readPromptInclude(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("read prompt include %s: %w", rel, err)
+		}
+		b.WriteString("\n\n## Included Context: ")
+		b.WriteString(rel)
+		b.WriteString("\n\n")
+		b.WriteString(text)
+		if truncated {
+			b.WriteString("\n\n[truncated at 65536 bytes]")
+		}
+	}
+	return b.String(), nil
+}
+
+func readPromptInclude(path string) (string, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", false, err
+	}
+	if info.IsDir() {
+		return "", false, fmt.Errorf("is a directory")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, promptIncludeMaxBytes+1))
+	if err != nil {
+		return "", false, err
+	}
+	truncated := len(data) > promptIncludeMaxBytes
+	if truncated {
+		data = data[:promptIncludeMaxBytes]
+	}
+	return string(data), truncated, nil
 }
 
 func agentCommand(cfg config.Effective) string {

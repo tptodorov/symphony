@@ -336,6 +336,7 @@ Returned workflow object:
 Top-level keys:
 
 - `tracker`
+- `prompt`
 - `polling`
 - `workspace`
 - `hooks`
@@ -366,7 +367,24 @@ Note:
 - When `agent_kind` is absent, implementations MUST default to `codex` for backward compatibility
   with existing `WORKFLOW.md` files.
 
-#### 5.3.2 `tracker` (object)
+#### 5.3.2 `prompt` (object)
+
+Fields:
+
+- `include_files` (array of strings)
+  - Default: `[]`.
+  - Each value is a workspace-relative file path.
+  - After workspace preparation hooks complete and before the coding agent is launched,
+    implementations SHOULD read each existing file and append its bounded contents to the rendered
+    workflow prompt.
+  - Missing include files are skipped.
+  - Include paths MUST NOT escape the per-issue workspace. Invalid include paths fail the current
+    run attempt before the coding agent is launched.
+  - Implementations SHOULD bound included content. A 64 KiB cap per file is sufficient.
+  - Hooks MAY write files listed here, for example `.symphony/setup-packet.md`, to contribute
+    deterministic setup context to the agent prompt without printing hook stdout into the prompt.
+
+#### 5.3.3 `tracker` (object)
 
 Fields:
 
@@ -615,6 +633,13 @@ Template input variables:
 - `attempt` (integer or null)
   - `null`/absent on first attempt.
   - Integer on retry or continuation run.
+
+Prompt include files:
+
+- `prompt.include_files` is evaluated after hook execution, so hooks can generate include files.
+- Include files are appended to the rendered prompt for future agent launches.
+- Include files are context only; they do not change tracker state, workspace state, or retry
+  decisions except when an include path is invalid or an existing include file cannot be read.
 
 Fallback prompt behavior:
 
@@ -1965,6 +1990,7 @@ Inputs to prompt rendering:
 - `workflow.prompt_template`
 - normalized `issue` object
 - OPTIONAL `attempt` integer (retry/continuation metadata)
+- OPTIONAL workspace prompt include files from `prompt.include_files`
 
 ### 12.2 Rendering Rules
 
@@ -1988,6 +2014,12 @@ If prompt rendering fails:
 
 - Fail the run attempt immediately.
 - Let the orchestrator treat it like any other worker failure and decide retry behavior.
+
+If prompt include assembly fails:
+
+- Fail the run attempt immediately before launching the coding agent.
+- Missing include files do not fail the run attempt.
+- Invalid include paths or unreadable existing include files fail the run attempt.
 
 ## 13. Logging, Status, and Observability
 
@@ -3108,6 +3140,7 @@ Use the same validation profiles as Section 17:
   - Pi RPC mode with JSONL over stdio (`pi.command`)
 - Agent config supports `agent_kind` selection with defaults and validation
 - Strict prompt rendering with `issue` and `attempt` variables
+- Configured workspace prompt include files are appended after hooks and before agent launch
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
 - Reconciliation that stops runs on terminal/non-active tracker states

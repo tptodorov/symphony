@@ -64,6 +64,12 @@ workspace:
   # Relative paths are resolved from the directory containing WORKFLOW.md.
   root: .symphony/workspaces
 
+prompt:
+  # Workspace-relative files appended to the rendered agent prompt after hooks
+  # run. Hooks can write these files during before_run.
+  include_files:
+    - .symphony/setup-packet.md
+
 hooks:
   # Hook scripts inherit the Symphony process environment. Variables added by
   # Symphony itself use the SYMPHONY_ prefix only.

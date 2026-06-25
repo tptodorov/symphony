@@ -4,6 +4,7 @@ import "time"
 
 type EffectiveConfig struct {
 	PromptTemplate      string
+	PromptIncludeFiles  []string
 	WorkflowDir         string
 	AgentKind           string
 	TrackerKind         string

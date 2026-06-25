@@ -79,6 +79,36 @@ func TestReadyQueueSnapshotUsesDispatchOrder(t *testing.T) {
 	}
 }
 
+func TestPromptIncludesHookWrittenFiles(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TrackerKind = "linear"
+	cfg.ActiveStates = []string{"Todo"}
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.PromptTemplate = "base prompt"
+	cfg.PromptIncludeFiles = []string{".symphony/setup-packet.md", "missing.md"}
+	cfg.Hooks.BeforeRun = `mkdir -p .symphony; printf 'packet context\n' > .symphony/setup-packet.md`
+	tr := &trackerfake.Tracker{Issues: []domain.Issue{{ID: "1", Identifier: "A-1", Title: "T", State: "Todo"}}}
+	runner := &promptCapturingRunner{started: make(chan agent.RunRequest, 1), release: make(chan struct{})}
+	o := New(cfg, tr, runner, workspace.NewManager(cfg.WorkspaceRoot))
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer close(runner.release)
+
+	var req agent.RunRequest
+	select {
+	case req = <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	if !strings.Contains(req.Prompt, "base prompt") || !strings.Contains(req.Prompt, "## Included Context: .symphony/setup-packet.md") || !strings.Contains(req.Prompt, "packet context") {
+		t.Fatalf("prompt missing include context:\n%s", req.Prompt)
+	}
+	if strings.Contains(req.Prompt, "missing.md") {
+		t.Fatalf("missing include should be skipped:\n%s", req.Prompt)
+	}
+}
+
 func TestForwardEventsAdoptsAgentSessionIdentity(t *testing.T) {
 	cfg := config.Defaults()
 	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
@@ -238,6 +268,21 @@ type queueBlockingRunner struct {
 
 func (r *queueBlockingRunner) Run(ctx context.Context, req agent.RunRequest, events chan<- agent.Event) agent.Result {
 	close(r.started)
+	select {
+	case <-r.release:
+		return agent.Result{SessionID: req.SessionID, Completed: false, Err: errors.New("released")}
+	case <-ctx.Done():
+		return agent.Result{SessionID: req.SessionID, Completed: false, Err: ctx.Err()}
+	}
+}
+
+type promptCapturingRunner struct {
+	started chan agent.RunRequest
+	release chan struct{}
+}
+
+func (r *promptCapturingRunner) Run(ctx context.Context, req agent.RunRequest, events chan<- agent.Event) agent.Result {
+	r.started <- req
 	select {
 	case <-r.release:
 		return agent.Result{SessionID: req.SessionID, Completed: false, Err: errors.New("released")}

@@ -17,6 +17,7 @@ var envRef = regexp.MustCompile(`\$[A-Za-z_][A-Za-z0-9_]*`)
 func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, error) {
 	cfg := Defaults()
 	cfg.PromptTemplate = wf.PromptTemplate
+	cfg.PromptIncludeFiles = stringSlice(wf.Config, "prompt.include_files", cfg.PromptIncludeFiles)
 	cfg.WorkflowDir = filepath.Dir(workflowPath)
 	m := wf.Config
 	cfg.AgentKind = str(m, "agent_kind", cfg.AgentKind)

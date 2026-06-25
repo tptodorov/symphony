@@ -114,6 +114,19 @@ func TestResolveCodexSpecPolicyFields(t *testing.T) {
 	}
 }
 
+func TestResolvePromptIncludeFiles(t *testing.T) {
+	wf := domain.WorkflowDefinition{Config: map[string]any{
+		"prompt": map[string]any{"include_files": []any{".symphony/setup-packet.md", "notes.md"}},
+	}}
+	cfg, err := Resolve(wf, filepath.Join(t.TempDir(), "WORKFLOW.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.PromptIncludeFiles) != 2 || cfg.PromptIncludeFiles[0] != ".symphony/setup-packet.md" || cfg.PromptIncludeFiles[1] != "notes.md" {
+		t.Fatalf("include files = %#v", cfg.PromptIncludeFiles)
+	}
+}
+
 func TestJiraRequiresEndpoint(t *testing.T) {
 	cfg, err := Resolve(domain.WorkflowDefinition{Config: map[string]any{"tracker": map[string]any{"kind": "jira", "email": "user@example.com", "api_token": "token", "project_key": "MOD"}}}, "WORKFLOW.md")
 	if err != nil {
