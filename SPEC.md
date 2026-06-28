@@ -101,7 +101,7 @@ Important boundary:
 6. `Agent Runner`
    - Creates workspace.
    - Builds prompt from issue + workflow template.
-   - Launches the coding agent app-server client.
+   - Launches the selected coding-agent subprocess and protocol client.
    - Streams agent updates back to the orchestrator.
 
 7. `Status Surface` (OPTIONAL)
@@ -571,11 +571,12 @@ The `pi` section configures the Pi coding-agent integration and is used only whe
 `agent_kind == "pi"`. Implementations MUST ignore these fields when `agent_kind == "codex"`.
 
 - `command` (string shell command)
-  - Default: `pi`.
+  - Default: `pi --mode rpc --no-session`.
   - The runtime launches this command via `bash -lc` in the workspace directory.
   - The launched process MUST speak the Pi RPC protocol over stdio.
-  - Implementations SHOULD launch with `--mode rpc --no-session` unless the implementation
-    explicitly manages persistent Pi sessions across worker runs.
+  - The command is the complete Pi invocation. Implementations SHOULD include `--mode rpc` and
+    SHOULD include `--no-session` unless they explicitly manage persistent Pi sessions across
+    worker runs.
 - `provider` (string)
   - Default: implementation-defined.
   - Passed to Pi as `--provider` when starting RPC mode.
@@ -799,7 +800,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
 - `agent_kind`: string, default `codex`; supported values are `codex` and `pi`
-- `pi.command`: shell command string, default `pi`; used when `agent_kind == "pi"`
+- `pi.command`: shell command string, default `pi --mode rpc --no-session`; used when `agent_kind == "pi"`
 - `pi.provider`: string, default implementation-defined; used when `agent_kind == "pi"`
 - `pi.model`: string, default implementation-defined; used when `agent_kind == "pi"`
 - `pi.approval_policy`: string or map, default implementation-defined; used when `agent_kind == "pi"`
@@ -1342,14 +1343,17 @@ Framing requirements:
 
 Subprocess launch parameters:
 
-- Command: `pi.command`
-- Recommended invocation: `bash -lc "<pi.command> --mode rpc --no-session"`
+- Command: `pi.command`, plus `--provider <pi.provider>` and `--model <pi.model>` when those
+  fields are configured.
+- Invocation: `bash -lc <resolved-pi-command>`.
 - Working directory: workspace path
 - Transport/framing: Pi RPC JSONL over stdio
 
 Notes:
 
-- The default command is `pi`.
+- The default command is `pi --mode rpc --no-session`.
+- `pi.command` is treated as a complete shell command and is not automatically suffixed with cwd
+  flags. Workspace binding is provided by the subprocess working directory.
 - `provider` and `model` are supplied as CLI arguments if configured in front matter
   (for example `--provider <pi.provider> --model <pi.model>`).
 - Implementations MAY omit `--no-session` only if they explicitly manage persistent Pi sessions and
@@ -1383,7 +1387,8 @@ Session identifiers:
   Codex app-server.
 - The implementation MUST derive a stable `session_id` from Pi session metadata or process lifetime.
 - A conforming implementation MAY use the Pi `sessionId` from `get_state` responses, the CLI
-  `--name` argument, or another stable process-scoped identifier.
+  `--name` argument, the Pi process ID (for example `pi-<pid>`), or another stable process-scoped
+  identifier.
 - The implementation MUST document the chosen `session_id` derivation.
 
 #### 10.2.3 Session State and Model Management
@@ -1420,11 +1425,11 @@ The client sends prompts and processes Pi events until the active operation term
 
 Completion conditions:
 
-- Pi `agent_end` event with a terminal assistant message -> success
+- Pi `agent_end` event -> success for that turn
 - Pi `message_update` event with `assistantMessageEvent.type == "error"` -> failure
 - Turn timeout (`pi.turn_timeout_ms`) -> failure
 - Tool execution result marked `isError: true` for a terminal operation -> failure
-- Subprocess exit -> failure
+- Subprocess exit before the required `agent_end` event -> failure
 
 Continuation processing:
 
@@ -1432,6 +1437,8 @@ Continuation processing:
   `steer` command on the same live Pi process.
 - The Pi subprocess SHOULD remain alive across those continuation turns and be stopped only when
   the worker run is ending.
+- Continuation turns are bounded by `agent.max_turns`, using the same semantics as the Codex
+  integration.
 - The implementation MUST avoid resending the original issue prompt on continuation turns when the
   Pi session already retains conversation history.
 
@@ -1499,6 +1506,9 @@ Extension UI protocol:
   `extension_ui_response` on stdin.
 - The implementation MUST respond to extension UI requests in a conforming way or document a
   policy for resolving them automatically.
+- The Go implementation cancels blocking dialog requests by default and cancels them with an
+  explicit policy error when `pi.approval_policy` is `strict` or `{mode: "strict"}`. Fire-and-forget
+  extension UI requests are ignored.
 - A run MUST NOT stall indefinitely waiting for extension UI responses.
 
 #### 10.2.7 Queue Modes, Compaction, and Retry

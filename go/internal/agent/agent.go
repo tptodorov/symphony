@@ -21,6 +21,7 @@ type RunRequest struct {
 	EnableBeadsCLI      bool
 	EnableLinearGraphQL bool
 	TrackerBDCommand    string
+	TrackerWorkDir      string
 	TrackerEndpoint     string
 	TrackerAPIKey       string
 	Logs                domain.RunLogPaths

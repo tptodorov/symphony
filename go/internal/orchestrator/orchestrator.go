@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -274,7 +275,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, issue domain.Issue) error {
 	o.updateAttempt(issue.ID, issue.Identifier, attempt, ws.Path, string(domain.RunAttemptStreaming), nil)
 	go func() {
 		start := time.Now()
-		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), ReadTimeout: agentReadTimeout(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL, TrackerBDCommand: cfg.TrackerBDCommand, TrackerEndpoint: cfg.TrackerEndpoint, TrackerAPIKey: cfg.TrackerAPIKey, Logs: logs}, ch)
+		res := o.runner.Run(rctx, agent.RunRequest{Issue: issue, Workspace: ws.Path, Prompt: p, Attempt: attempt, SessionID: sessionID, MaxTurns: cfg.Agent.MaxTurns, Command: agentCommand(cfg), ReadTimeout: agentReadTimeout(cfg), TurnTimeout: agentTurnTimeout(cfg), Policy: agentPolicy(cfg), EnableBeadsCLI: cfg.EnableBeadsCLI, EnableLinearGraphQL: cfg.EnableLinearGraphQL, TrackerBDCommand: cfg.TrackerBDCommand, TrackerWorkDir: cfg.WorkflowDir, TrackerEndpoint: cfg.TrackerEndpoint, TrackerAPIKey: cfg.TrackerAPIKey, Logs: logs}, ch)
 		close(ch)
 		if cfg.Hooks.AfterRun != "" {
 			_ = workspace.RunHook(context.Background(), cfg.Hooks.AfterRun, ws.Path, cfg.Hooks.Timeout)
@@ -360,9 +361,20 @@ func readPromptInclude(path string) (string, bool, error) {
 
 func agentCommand(cfg config.Effective) string {
 	if cfg.AgentKind == "pi" {
-		return cfg.Pi.Command
+		return piCommand(cfg.Pi)
 	}
 	return cfg.Codex.Command
+}
+
+func piCommand(cfg domain.PiConfig) string {
+	cmd := cfg.Command
+	if cfg.Provider != "" {
+		cmd += " --provider " + strconv.Quote(cfg.Provider)
+	}
+	if cfg.Model != "" {
+		cmd += " --model " + strconv.Quote(cfg.Model)
+	}
+	return cmd
 }
 
 func agentTurnTimeout(cfg config.Effective) time.Duration {
@@ -671,6 +683,11 @@ func appendAgentTextMessage(tail []AgentTextMessage, ev agent.Event, limit int) 
 	}
 	if len(tail) > 0 && ev.Type == "item_agentMessage_delta" && tail[len(tail)-1].Event == ev.Type && tail[len(tail)-1].itemID == "" {
 		tail[len(tail)-1].Text += ev.Text
+		tail[len(tail)-1].At = at
+		return trimAgentTextTail(tail, limit)
+	}
+	if len(tail) > 0 && ev.Type == "message_update" && tail[len(tail)-1].Event == ev.Type && tail[len(tail)-1].itemID == "" {
+		tail[len(tail)-1].Text = ev.Text
 		tail[len(tail)-1].At = at
 		return trimAgentTextTail(tail, limit)
 	}

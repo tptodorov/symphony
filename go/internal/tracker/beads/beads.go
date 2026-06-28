@@ -23,7 +23,7 @@ func New() *Tracker { return &Tracker{Command: "bd"} }
 
 func (t *Tracker) FetchCandidates(ctx context.Context, cfg config.Effective) ([]domain.Issue, error) {
 	issues, err := t.runList(ctx, cfg, []string{"ready", "--json"})
-	if err != nil {
+	if err != nil || len(issues) == 0 {
 		args := []string{"list", "--json"}
 		for _, s := range cfg.ActiveStates {
 			args = append(args, "--status", s)

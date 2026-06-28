@@ -244,7 +244,12 @@ func TestRunnerAdvertisesConfiguredDynamicTools(t *testing.T) {
 
 func TestRunnerHandlesBeadsDynamicTool(t *testing.T) {
 	workspace := t.TempDir()
+	trackerDir := t.TempDir()
 	logPath := filepath.Join(workspace, "protocol.jsonl")
+	bdPath := filepath.Join(workspace, "fake-bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\npwd\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	r := New(fakeCodexCommand(t, "beads-tool", logPath))
 	res := r.Run(context.Background(), agent.RunRequest{
@@ -255,7 +260,8 @@ func TestRunnerHandlesBeadsDynamicTool(t *testing.T) {
 		ReadTimeout:      time.Second,
 		TurnTimeout:      time.Second,
 		EnableBeadsCLI:   true,
-		TrackerBDCommand: "printf",
+		TrackerBDCommand: shellQuote(bdPath),
+		TrackerWorkDir:   trackerDir,
 	}, make(chan agent.Event, 32))
 	if res.Err != nil {
 		t.Fatal(res.Err)
@@ -265,7 +271,7 @@ func TestRunnerHandlesBeadsDynamicTool(t *testing.T) {
 	if got := valueAt(response, "result", "success"); got != true {
 		t.Fatalf("tool response success = %#v response=%#v", got, response)
 	}
-	if text, _ := valueAt(response, "result", "contentItems", 0, "text").(string); !strings.Contains(text, `"Stdout":"ok"`) {
+	if text, _ := valueAt(response, "result", "contentItems", 0, "text").(string); !strings.Contains(text, trackerDir) {
 		t.Fatalf("tool response text = %q", text)
 	}
 }

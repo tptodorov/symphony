@@ -261,6 +261,42 @@ func TestAgentTextTailUsesCodexItemBoundaries(t *testing.T) {
 	}
 }
 
+func TestAgentTextTailCoalescesPiMessageUpdates(t *testing.T) {
+	cfg := config.Defaults()
+	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
+	started := time.Now()
+	o.mu.Lock()
+	o.running["1"] = running{
+		issue:         domain.Issue{ID: "1", Identifier: "A-1", Title: "T", State: "Todo"},
+		sessionID:     "A-1-dispatch",
+		workspace:     filepath.Join(t.TempDir(), "A-1"),
+		started:       started,
+		lastEvent:     started,
+		status:        "running",
+		lastEventType: "session_started",
+	}
+	o.mu.Unlock()
+
+	events := make(chan agent.Event, 2)
+	events <- agent.Event{IssueID: "1", Type: "message_update", Text: "Completed", At: time.Now()}
+	events <- agent.Event{IssueID: "1", Type: "message_update", Text: "Completed api-22z", At: time.Now()}
+	close(events)
+
+	o.forwardEvents(events)
+
+	sn := o.Snapshot()
+	if len(sn.Running) != 1 {
+		t.Fatalf("running count = %d", len(sn.Running))
+	}
+	got := sn.Running[0].RecentAgentMessages
+	if len(got) != 1 {
+		t.Fatalf("tail length = %d, tail=%+v", len(got), got)
+	}
+	if got[0].Text != "Completed api-22z" {
+		t.Fatalf("tail text = %+v", got)
+	}
+}
+
 type queueBlockingRunner struct {
 	started chan struct{}
 	release chan struct{}

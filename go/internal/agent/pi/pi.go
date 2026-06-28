@@ -18,6 +18,8 @@ import (
 	"github.com/tptodorov/symphony/go/internal/tools"
 )
 
+const continuationPrompt = "Continue working on the same issue. Re-check the tracker state and move the issue toward the workflow-defined handoff state. Do not repeat context already present in this thread."
+
 type Runner struct{ Command string }
 
 func New(command string) *Runner { return &Runner{Command: command} }
@@ -29,9 +31,6 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	}
 	if command == "" {
 		command = "pi --mode rpc --no-session"
-	}
-	if req.Workspace != "" && !strings.Contains(command, "--cwd") {
-		command += " --cwd " + req.Workspace
 	}
 	if req.Workspace == "" {
 		return agent.Result{SessionID: req.SessionID, Err: fmt.Errorf("workspace path is required")}
@@ -75,7 +74,11 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 		return finish(agent.Result{SessionID: sessionID, Err: fmt.Errorf("send pi prompt: %w", err)})
 	}
 
-	completed, err := r.read(stdout, events, req, stdin, sessionID, runLogs)
+	maxTurns := req.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 1
+	}
+	completed, err := r.read(stdout, events, req, stdin, sessionID, runLogs, maxTurns)
 	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
 		return finish(agent.Result{SessionID: sessionID, Err: ctx.Err()})
@@ -85,6 +88,9 @@ func (r *Runner) Run(ctx context.Context, req agent.RunRequest, events chan<- ag
 	}
 	if waitErr != nil {
 		return finish(agent.Result{SessionID: sessionID, Err: fmt.Errorf("pi exited: %w: %s", waitErr, stderr.String())})
+	}
+	if !completed {
+		return finish(agent.Result{SessionID: sessionID, Err: fmt.Errorf("subprocess_exit: pi exited before agent_end")})
 	}
 	return finish(agent.Result{SessionID: sessionID, Completed: completed})
 }
@@ -96,11 +102,13 @@ func derivePISessionID(reqSessionID string, cmd *exec.Cmd) string {
 	return reqSessionID
 }
 
-func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.RunRequest, stdin io.WriteCloser, sessionID string, runLogs *agent.RunLogs) (bool, error) {
+func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.RunRequest, stdin io.WriteCloser, sessionID string, runLogs *agent.RunLogs, maxTurns int) (bool, error) {
 	s := bufio.NewScanner(stdout)
 	s.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	completed := false
 	accepted := false
+	promptID := req.SessionID
+	turnsCompleted := 0
 	for s.Scan() {
 		line := s.Text()
 		runLogs.WriteProtocol("recv", []byte(line))
@@ -110,7 +118,7 @@ func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.Run
 			continue
 		}
 		typeName, _ := msg["type"].(string)
-		if typeName == "response" && msg["id"] == req.SessionID {
+		if typeName == "response" && msg["id"] == promptID {
 			if ok, _ := msg["success"].(bool); !ok {
 				return false, fmt.Errorf("pi prompt rejected: %v", msg["error"])
 			}
@@ -123,8 +131,18 @@ func (r *Runner) read(stdout io.Reader, events chan<- agent.Event, req agent.Run
 			_ = handleToolRequest(stdin, runLogs, msg, req)
 		}
 		if typeName == "agent_end" {
+			turnsCompleted++
 			completed = true
-			_ = stdin.Close()
+			if !shouldContinueAfterAgentEnd(msg, turnsCompleted, maxTurns) {
+				_ = stdin.Close()
+			} else {
+				promptID = fmt.Sprintf("%s-turn-%d", req.SessionID, turnsCompleted+1)
+				accepted = false
+				completed = false
+				if err := writeLoggedJSON(stdin, runLogs, map[string]any{"id": promptID, "type": "prompt", "message": continuationPrompt}); err != nil {
+					return false, fmt.Errorf("send pi continuation prompt: %w", err)
+				}
+			}
 		}
 		events <- agent.Event{SessionID: sessionID, IssueID: req.Issue.ID, Type: typeName, Message: line, Text: piText(msg), Usage: extractPIUsage(msg), RateLimits: extractPIRateLimits(msg), At: time.Now()}
 	}
@@ -150,7 +168,7 @@ func handleToolRequest(w io.Writer, logs *agent.RunLogs, msg map[string]any, req
 	switch method {
 	case "beads_cli":
 		args := parseStringArray(msg["args"])
-		result = tools.ExecuteBeadsCLI(context.Background(), req.Workspace, req.TrackerBDCommand, args)
+		result = tools.ExecuteBeadsCLI(context.Background(), firstNonEmpty(req.TrackerWorkDir, req.Workspace), req.TrackerBDCommand, args)
 	case "linear_graphql":
 		query, _ := msg["query"].(string)
 		vars, _ := msg["variables"].(map[string]any)
@@ -165,6 +183,25 @@ func handleToolRequest(w io.Writer, logs *agent.RunLogs, msg map[string]any, req
 		resp["result"] = result.ParsedJSON
 	}
 	return writeLoggedJSON(w, logs, resp)
+}
+
+func shouldContinueAfterAgentEnd(msg map[string]any, turnsCompleted, maxTurns int) bool {
+	if turnsCompleted >= maxTurns {
+		return false
+	}
+	if willRetry, ok := msg["willRetry"].(bool); ok {
+		return willRetry
+	}
+	return true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func parseStringArray(v any) []string {
@@ -239,12 +276,67 @@ func piText(msg map[string]any) string {
 			return text
 		}
 	}
+	if text := piAssistantText(msg["assistantMessageEvent"]); text != "" {
+		return text
+	}
+	if text := piAssistantText(msg["message"]); text != "" {
+		return text
+	}
 	if item, ok := msg["item"].(map[string]any); ok {
 		if text, ok := item["text"].(string); ok {
 			return text
 		}
 	}
 	return ""
+}
+
+func piAssistantText(v any) string {
+	msg, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if partial, ok := msg["partial"].(map[string]any); ok {
+		if text := piContentText(partial["content"]); text != "" {
+			return text
+		}
+	}
+	if text := piContentText(msg["content"]); text != "" {
+		return text
+	}
+	if typ, _ := msg["type"].(string); typ == "text_delta" {
+		if text, ok := msg["delta"].(string); ok {
+			return text
+		}
+	}
+	if text, ok := msg["text"].(string); ok {
+		return text
+	}
+	return ""
+}
+
+func piContentText(v any) string {
+	switch content := v.(type) {
+	case string:
+		return content
+	case []any:
+		parts := []string{}
+		for _, item := range content {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			typ, _ := m["type"].(string)
+			if typ != "" && typ != "text" && typ != "output_text" {
+				continue
+			}
+			if text, ok := m["text"].(string); ok && text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
 }
 
 func respondExtensionUI(w io.Writer, logs *agent.RunLogs, msg map[string]any, policy any) error {
@@ -268,11 +360,11 @@ func isStrictPolicy(policy any) bool {
 		return false
 	}
 	if s, ok := policy.(string); ok {
-		return s == "strict"
+		return strings.EqualFold(s, "strict")
 	}
 	if m, ok := policy.(map[string]any); ok {
 		if mode, ok := m["mode"].(string); ok {
-			return mode == "strict"
+			return strings.EqualFold(mode, "strict")
 		}
 	}
 	return false

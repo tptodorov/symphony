@@ -432,7 +432,7 @@ func (c *appServerClient) handleDynamicToolCall(params json.RawMessage) map[stri
 		if !ok || len(args) == 0 {
 			return dynamicToolFailure("beads_cli requires args")
 		}
-		result := tools.ExecuteBeadsCLI(c.ctx, c.req.Workspace, c.req.TrackerBDCommand, args)
+		result := tools.ExecuteBeadsCLI(c.ctx, firstNonEmpty(c.req.TrackerWorkDir, c.req.Workspace), c.req.TrackerBDCommand, args)
 		return dynamicToolResult(result)
 	case "linear_graphql":
 		query, variables, err := parseLinearGraphQLArgs(root["arguments"])
