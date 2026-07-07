@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	agentfake "github.com/openai/symphony/go/internal/agent/fake"
-	trackerfake "github.com/openai/symphony/go/internal/tracker/fake"
+	agentfake "github.com/tptodorov/symphony/go/internal/agent/fake"
+	trackerfake "github.com/tptodorov/symphony/go/internal/tracker/fake"
 )
 
 func TestSmokeBeadsPiWorkflow(t *testing.T) {

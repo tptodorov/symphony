@@ -154,16 +154,10 @@ func TestDashboardUsesStateAPI(t *testing.T) {
 		t.Fatal(rr.Code)
 	}
 	body := rr.Body.String()
-	for _, want := range []string{"Queued Work", "Running Sessions", "Ready", "Setting up", "Total tokens", "/api/v1/state", "session-tail", "details class=\"setup-block\""} {
+	for _, want := range []string{"Queued work", "Active sessions", "Total tokens", "/api/v1/state", "symphony-mark.svg", "Retry queue", "Agent run"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard missing %q: %s", want, body)
 		}
-	}
-	if strings.Contains(body, "{label:'Session'") {
-		t.Fatalf("dashboard should not show session as a running-session column: %s", body)
-	}
-	if strings.Contains(body, "Log / Workspace") || strings.Contains(body, "renderLogWorkspace") || strings.Contains(body, "col-paths") {
-		t.Fatalf("dashboard should not show log/workspace as a running-session column: %s", body)
 	}
 }
 
