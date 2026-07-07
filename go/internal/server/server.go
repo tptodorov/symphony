@@ -24,6 +24,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(dashboardHTML))
 		return
 	}
+	if r.URL.Path == "/assets/symphony-mark.svg" {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write([]byte(symphonyMarkSVG))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if r.URL.Path == "/api/v1/state" {
 		if r.Method != http.MethodGet {
@@ -84,155 +94,478 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
+const symphonyMarkSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Symphony">
+  <rect width="32" height="32" rx="7" fill="#091A23"></rect>
+  <g>
+    <rect x="7.4" y="15" width="2.8" height="9.6" rx="1.4" fill="#FFFFFF"></rect>
+    <rect x="12.6" y="8.6" width="2.8" height="16" rx="1.4" fill="#5ED1FF"></rect>
+    <rect x="17.8" y="17" width="2.8" height="7.6" rx="1.4" fill="#FFFFFF"></rect>
+    <rect x="23" y="12" width="2.8" height="12.6" rx="1.4" fill="#FFFFFF"></rect>
+  </g>
+</svg>`
+
 const dashboardHTML = `<!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Symphony</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500&family=Space+Mono&display=swap" rel="stylesheet">
 <style>
-	body{font:14px system-ui,sans-serif;margin:0;background:#f7f8fa;color:#20242a}header{display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid #d8dde4;background:#fff}main{padding:20px 24px;display:grid;gap:18px}h1{font-size:20px;margin:0}h2{font-size:15px;margin:0 0 10px}.toolbar{display:flex;gap:12px;align-items:center}.status{font-weight:600}.ok{color:#16723a}.bad{color:#b42318}button{border:1px solid #b8c0cc;background:#fff;border-radius:6px;padding:7px 10px;cursor:pointer}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.metric{background:#fff;border:1px solid #d8dde4;border-radius:6px;padding:12px}.metric strong{display:block;font-size:22px}.panel{background:#fff;border:1px solid #d8dde4;border-radius:6px;padding:14px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #e6e9ee;padding:8px;vertical-align:top}th{font-size:12px;text-transform:uppercase;color:#5d6673}a{color:#175cd3;text-decoration:none}a:hover{text-decoration:underline}code,pre{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}pre{margin:0;background:#f1f3f6;border-radius:6px;padding:10px;overflow:auto}.empty{color:#6a7280}.sessions-table{table-layout:fixed;min-width:840px}.sessions-table th,.sessions-table td{overflow:hidden}.sessions-table .col-issue{width:120px}.sessions-table .col-title{width:260px}.sessions-table .col-state{width:120px}.sessions-table .col-turns{width:70px}.sessions-table .col-event{width:155px}.sessions-table .col-tokens{width:115px}.path-stack{display:grid;gap:6px}.path-label{font-size:11px;text-transform:uppercase;color:#6a7280}.path-value{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}.tails{display:grid;gap:10px;margin-top:12px}details{border:1px solid #e1e5eb;border-radius:6px;padding:10px;background:#fafbfc}summary{cursor:pointer;font-weight:600}.session-tail{display:grid;gap:10px;margin-top:10px}.chat-log{display:grid;gap:10px;max-height:520px;overflow:auto;padding-right:4px}.chat-msg{display:grid;gap:4px;max-width:min(920px,100%)}.chat-meta{font-size:12px;color:#6a7280}.chat-bubble{background:#eef4ff;border:1px solid #c9d9f4;border-radius:8px;padding:10px 12px;line-height:1.45;white-space:pre-wrap}.setup-block{border:1px solid #f0c36a;background:#fff8e5;border-radius:8px;padding:10px 12px}.setup-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:8px}.setup-logs{margin-top:8px}.setup-error{white-space:pre-wrap;background:#fff1f0;border:1px solid #ffd0cc;color:#8a1f11;margin-top:8px}
+*{box-sizing:border-box;}
+html,body{margin:0;height:100%;-webkit-font-smoothing:antialiased;}
+:root{
+  --font-sans:'Space Grotesk',system-ui,-apple-system,sans-serif;
+  --font-mono:'Space Mono',ui-monospace,'SFMono-Regular',monospace;
+  --fg:#1A2B35;
+  --fg-muted:#2D4754;
+  --fg-subtle:#5C707A;
+  --bg:#FFFFFF;
+  --bg-elev:#F3F5F6;
+  --border:#D9D9D9;
+  --page-bg:#EEF1F2;
+  --hyper:#FF4438;
+  --hyper-bg:#FFF3F2;
+  --hyper-border:#FFDFDC;
+  --hyper-dark:#B91C10;
+  --blue:#0E8EC0;
+  --lime:#A9CA03;
+  --lime-dark:#5E7000;
+  --purple:#9C42CE;
+  --slate:#5C707A;
+  --midnight:#091A23;
+}
+body{font-family:var(--font-sans);color:var(--fg);background:var(--page-bg);}
+a{color:inherit;text-decoration:none;}
+a.lnk{color:var(--fg-subtle);transition:color 120ms;}
+a.lnk:hover{color:var(--hyper);text-decoration:underline;}
+button{cursor:pointer;font-family:var(--font-sans);}
+@keyframes rdpulse{0%{opacity:1;transform:scale(1);}50%{opacity:.4;transform:scale(.8);}100%{opacity:1;transform:scale(1);}}
+.ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.scroll{overflow-y:auto;}
+.scroll::-webkit-scrollbar{width:8px;}
+.scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:999px;border:2px solid var(--page-bg);}
+
+#app{height:100vh;display:flex;flex-direction:column;}
+
+/* Top bar */
+#topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;background:var(--bg);border-bottom:1px solid var(--border);flex:none;}
+.brand{display:flex;align-items:center;gap:10px;}
+.brand-name{font-size:21px;font-weight:500;letter-spacing:-0.01em;}
+.controls{display:flex;align-items:center;gap:16px;}
+#status-dot{width:9px;height:9px;border-radius:999px;background:#D0F41D;animation:rdpulse 1.6s ease-in-out infinite;flex:none;}
+#status-text{font-family:var(--font-mono);font-size:13px;color:var(--fg-subtle);display:inline-flex;align-items:center;gap:8px;}
+#status-label{color:var(--fg);font-weight:500;}
+.auto-label{font-size:13px;color:var(--fg-subtle);}
+.btn-sm{border:1px solid var(--border);background:var(--bg);color:var(--fg);border-radius:6px;padding:6px 12px;font-size:13px;transition:background 120ms;}
+.btn-sm:hover{background:var(--page-bg);}
+
+/* KPI strip */
+#kpi{display:grid;grid-template-columns:repeat(7,1fr);background:var(--bg);border-bottom:1px solid var(--border);flex:none;}
+.kpi-tile{padding:14px 20px;border-right:1px solid var(--border);}
+.kpi-tile:last-child{border-right:none;}
+.kpi-lbl{font-family:var(--font-mono);font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:var(--fg-subtle);}
+.kpi-val{font-size:28px;font-weight:500;line-height:1.1;margin-top:3px;}
+
+/* Main */
+#main{flex:1;min-height:0;display:flex;}
+
+/* Sessions pane */
+#pane{flex:1;min-width:0;padding:20px 24px 32px;}
+.pane-hdr{display:flex;align-items:baseline;gap:6px;margin-bottom:12px;}
+.pane-title{font-size:16px;font-weight:500;}
+.pane-count{color:var(--fg-subtle);font-weight:400;}
+.ll{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px;font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);}
+.ll-lbl{letter-spacing:0.06em;text-transform:uppercase;}
+.ll-dot{width:9px;height:9px;border-radius:999px;display:inline-block;vertical-align:middle;margin-right:3px;}
+.ll-run{display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;background:var(--blue);color:#fff;font-size:9px;vertical-align:middle;margin-right:3px;}
+.ll-hint{color:var(--hyper);margin-left:6px;}
+.sessions-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:14px;align-items:start;}
+
+/* Session card */
+.card{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:15px 16px;cursor:pointer;transition:border-color 120ms;display:flex;flex-direction:column;gap:9px;}
+.card:hover{border-color:var(--fg);}
+.card-hdr{display:flex;align-items:center;gap:8px;}
+.iss-key{font-family:var(--font-mono);font-size:12px;}
+.card-right{margin-left:auto;display:flex;align-items:center;gap:8px;}
+.no-pr{font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);}
+.card-title{font-size:14.5px;font-weight:500;line-height:1.3;}
+.card-meta{font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);}
+.card-msg{font-size:12.5px;color:var(--fg-muted);line-height:1.4;border-top:1px solid var(--page-bg);padding-top:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+/* Lifecycle track */
+.lc{display:flex;align-items:center;}
+.lc-node{display:flex;align-items:center;flex:1;}
+.lc-dot{width:10px;height:10px;border-radius:999px;flex:none;}
+.lc-pill{display:inline-flex;align-items:center;padding:2px 7px;border-radius:999px;font-family:var(--font-mono);font-size:10px;flex:none;}
+.lc-line{flex:1;height:2px;}
+.dot-done{background:var(--midnight);}
+.dot-cur{background:var(--hyper);box-shadow:0 0 0 3px rgba(255,68,56,.18);}
+.dot-fut{background:transparent;border:1.5px solid var(--border);}
+.pill-cur{background:var(--blue);color:#fff;}
+.pill-done{background:var(--midnight);color:#fff;}
+.pill-fut{background:transparent;border:1.5px solid var(--border);color:var(--fg-subtle);}
+.line-done{background:var(--midnight);}
+.line-fut{background:var(--border);}
+
+/* Activity stream */
+.act-hdr{border-top:1px solid var(--border);margin-top:2px;padding-top:9px;}
+.act-lbl{font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--fg-subtle);margin-bottom:6px;}
+.act-stream{display:flex;flex-direction:column;max-height:220px;overflow-y:auto;}
+.act-row{display:flex;gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--page-bg);}
+.act-ts{font-family:var(--font-mono);font-size:10.5px;color:var(--fg-subtle);flex:none;width:44px;}
+.act-msg{flex:1;font-size:12px;line-height:1.4;color:var(--fg-muted);}
+
+/* Right rail */
+#rail{width:390px;flex:none;border-left:1px solid var(--border);background:var(--bg-elev);padding:20px 18px 32px;display:flex;flex-direction:column;gap:24px;}
+.rail-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+.rail-title{font-size:15px;font-weight:500;}
+.rail-cnt{color:var(--fg-subtle);font-weight:400;}
+.rail-hint{font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);}
+.rail-rows{display:flex;flex-direction:column;gap:6px;}
+.q-row{display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--bg);border:1px solid var(--border);border-radius:6px;}
+.q-body{flex:1;min-width:0;}
+.q-top{display:flex;justify-content:space-between;gap:8px;}
+.q-title{font-size:12.5px;color:var(--fg);line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.q-wait{font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);}
+.prio{width:8px;height:8px;border-radius:999px;flex:none;}
+.r-row{padding:11px;background:var(--hyper-bg);border:1px solid var(--hyper-border);border-radius:6px;}
+.r-key{font-family:var(--font-mono);font-size:11px;color:var(--hyper-dark);}
+.r-att{font-family:var(--font-mono);font-size:11px;color:var(--hyper-dark);}
+.r-title{font-size:12.5px;color:var(--fg);line-height:1.35;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.r-meta{font-family:var(--font-mono);font-size:11px;color:var(--fg-muted);margin-top:4px;}
+.d-row{padding:10px 11px;background:var(--bg);border:1px solid var(--border);border-radius:6px;}
+.d-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}
+.d-key{font-family:var(--font-mono);font-size:11px;}
+.d-title{font-size:12.5px;color:var(--fg);line-height:1.35;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.d-meta{font-family:var(--font-mono);font-size:10.5px;color:var(--fg-subtle);margin-top:4px;}
+.empty{font-size:12px;color:var(--fg-subtle);padding:4px 0;}
 </style>
-<header><h1>Symphony</h1><div class="toolbar"><span id="status" class="status">loading...</span><button onclick="refresh()">Refresh now</button></div></header>
-<main>
-  <section class="metrics">
-    <div class="metric"><span>Ready</span><strong id="ready-count">0</strong></div>
-    <div class="metric"><span>Setting up</span><strong id="setup-count">0</strong></div>
-    <div class="metric"><span>Running</span><strong id="running-count">0</strong></div>
-    <div class="metric"><span>Retrying</span><strong id="retrying-count">0</strong></div>
-    <div class="metric"><span>Total tokens</span><strong id="token-count">0</strong></div>
-    <div class="metric"><span>Runtime seconds</span><strong id="runtime-count">0</strong></div>
-  </section>
-  <section class="panel"><h2>Queued Work</h2><div id="queued"></div></section>
-  <section class="panel"><h2>Running Sessions</h2><div id="running"></div></section>
-  <section class="panel"><h2>Retry queue</h2><div id="retrying"></div></section>
-  <section class="panel"><h2>Rate limits</h2><pre id="rate-limits">null</pre></section>
-</main>
+
+<div id="app">
+  <div id="topbar">
+    <div class="brand">
+      <img src="/assets/symphony-mark.svg" width="28" height="28" alt="">
+      <span class="brand-name">Symphony</span>
+    </div>
+    <div class="controls">
+      <span id="status-text">
+        <span id="status-dot"></span>
+        <span id="status-label">loading</span>
+        <span id="status-ts"></span>
+      </span>
+      <span class="auto-label">auto-refresh 5s</span>
+      <button class="btn-sm" onclick="doRefresh()">Refresh now</button>
+    </div>
+  </div>
+
+  <div id="kpi">
+    <div class="kpi-tile"><div class="kpi-lbl">Queued</div><div class="kpi-val" id="kv-q">—</div></div>
+    <div class="kpi-tile"><div class="kpi-lbl">Preparing</div><div class="kpi-val" id="kv-p">—</div></div>
+    <div class="kpi-tile"><div class="kpi-lbl">Agent run</div><div class="kpi-val" id="kv-r" style="color:var(--blue)">—</div></div>
+    <div class="kpi-tile"><div class="kpi-lbl">Post-run hooks</div><div class="kpi-val" id="kv-ph" style="color:#7C1AB3">—</div></div>
+    <div class="kpi-tile"><div class="kpi-lbl">Retrying</div><div class="kpi-val" id="kv-rt" style="color:var(--hyper)">—</div></div>
+    <div class="kpi-tile"><div class="kpi-lbl">Done today</div><div class="kpi-val" id="kv-d" style="color:var(--lime-dark)">—</div></div>
+    <div class="kpi-tile"><div class="kpi-lbl">Total tokens</div><div class="kpi-val" id="kv-t">—</div></div>
+  </div>
+
+  <div id="main">
+    <div id="pane" class="scroll">
+      <div class="pane-hdr">
+        <span class="pane-title">Active sessions</span>
+        <span class="pane-count" id="sess-cnt">· —</span>
+      </div>
+      <div class="ll">
+        <span class="ll-lbl">Lifecycle</span>
+        <span><span class="ll-dot" style="background:var(--slate)"></span>prepare</span>
+        <span>·</span>
+        <span><span class="ll-dot" style="background:var(--purple)"></span>hooks</span>
+        <span>·</span>
+        <span><span class="ll-run">run</span>open-ended, by turn</span>
+        <span>·</span>
+        <span><span class="ll-dot" style="background:var(--lime)"></span>done</span>
+        <span class="ll-hint">◵ click a card to open its activity stream</span>
+      </div>
+      <div class="sessions-grid" id="grid"></div>
+    </div>
+
+    <div id="rail" class="scroll">
+      <div>
+        <div class="rail-hdr">
+          <span class="rail-title">Queued work <span class="rail-cnt" id="rq-cnt"></span></span>
+          <span class="rail-hint">next up ↓</span>
+        </div>
+        <div class="rail-rows" id="rq-rows"></div>
+      </div>
+      <div>
+        <div class="rail-hdr">
+          <span class="rail-title" style="color:var(--hyper-dark)">Retry queue <span class="rail-cnt" style="color:var(--fg-subtle)" id="rr-cnt"></span></span>
+        </div>
+        <div class="rail-rows" id="rr-rows"></div>
+      </div>
+      <div>
+        <div class="rail-hdr">
+          <span class="rail-title">Done today <span class="rail-cnt" id="rd-cnt"></span></span>
+          <span class="rail-hint">landed ↑</span>
+        </div>
+        <div class="rail-rows" id="rd-rows"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
-function clean(v){return v === undefined || v === null ? "" : String(v)}
-function text(v){return v === undefined || v === null || v === "" ? "n/a" : String(v)}
-function tokens(t){return t ? text(t.total_tokens) : "0"}
-function escape(v){return text(v).replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]})}
-function escapeRaw(v){return clean(v).replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]})}
-function escapeAttr(v){return clean(v).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]})}
-function cell(v){return "<td>"+escape(v)+"</td>"}
-function renderTable(rows, columns, tableClass){
-  if(!rows || rows.length === 0){return '<p class="empty">None</p>'}
-  var klass=tableClass ? ' class="'+escapeAttr(tableClass)+'"' : '';
-  var cols=columns.some(function(c){return c.className}) ? '<colgroup>'+columns.map(function(c){return '<col class="'+escapeAttr(c.className || '')+'">'}).join('')+'</colgroup>' : '';
-  return '<table'+klass+'>'+cols+'<thead><tr>'+columns.map(function(c){return '<th>'+c.label+'</th>'}).join('')+'</tr></thead><tbody>'+
-    rows.map(function(row){return '<tr>'+columns.map(function(c){var cls=c.className ? ' class="'+escapeAttr(c.className)+'"' : ''; return c.html ? '<td'+cls+'>'+c.html(row)+'</td>' : '<td'+cls+'>'+escape(c.value(row))+'</td>'}).join('')+'</tr>'}).join('')+
-    '</tbody></table>'
+var expandedId = null;
+var lastState = null;
+
+function x(v){
+  if(v==null) return '';
+  return String(v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});
 }
-function logPath(x){return x.log_path || (x.logs && x.logs.codex_session_logs && x.logs.codex_session_logs[0] && x.logs.codex_session_logs[0].path) || ''}
-function setupLogPath(x){return x && (x.log_path || (x.logs && x.logs[0] && x.logs[0].path)) || ''}
-function renderLink(url){
-  if(!url){return '<span class="empty">n/a</span>'}
-  return '<a href="'+escapeAttr(url)+'" target="_blank" rel="noreferrer">'+escape(url)+'</a>'
+function val(v,fb){return v==null||v===''?(fb!=null?fb:'—'):String(v);}
+function fmtTok(n){
+  if(!n) return '0';
+  if(n>=1e9) return (n/1e9).toFixed(2)+'B';
+  if(n>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(n>=1e3) return (n/1e3).toFixed(1)+'K';
+  return String(n);
 }
-function renderSetup(row){
-  var setup=row && row.setup;
-  if(!setup){return ''}
-  var setupLog=setupLogPath(setup);
-  var agentLog=logPath(row);
-  var workspace=setup.workspace || setup.failed_workspace || row.workspace || '';
-  var html='<details class="setup-block" open><summary>Setup '+escape(setup.status)+' - '+escape(setup.stage)+'</summary><div class="setup-grid">';
-  html+='<div><div class="path-label">Stage</div><div class="path-value">'+escape(setup.stage)+'</div></div>';
-  html+='<div><div class="path-label">Status</div><div class="path-value">'+escape(setup.status)+'</div></div>';
-  if(setup.hook){html+='<div><div class="path-label">Hook</div><div class="path-value">'+escape(setup.hook)+'</div></div>'}
-  if(workspace){html+='<div><div class="path-label">Workspace</div><div class="path-value">'+escape(workspace)+'</div></div>'}
-  if(setup.failed_workspace){html+='<div><div class="path-label">Failed workspace</div><div class="path-value">'+escape(setup.failed_workspace)+'</div></div>'}
-  html+='</div>';
-  if(setupLog || (agentLog && agentLog !== setupLog)){
-    html+='<div class="path-stack setup-logs"><div class="path-label">Logs</div>';
-    if(setupLog){html+='<div><div class="path-label">Setup log</div><div class="path-value">'+escape(setupLog)+'</div></div>'}
-    if(agentLog && agentLog !== setupLog){html+='<div><div class="path-label">Agent log</div><div class="path-value">'+escape(agentLog)+'</div></div>'}
-    html+='</div>';
+function fmtSecs(s){
+  if(!s||s<0) return '—';
+  s=Math.round(s);
+  if(s<60) return s+'s';
+  var m=Math.floor(s/60);
+  if(m<60) return m+'m';
+  var h=Math.floor(m/60),r=m%60;
+  return h+'h'+(r?' '+r+'m':'');
+}
+function fmtRelTime(iso){
+  if(!iso) return '—';
+  return fmtSecs((Date.now()-new Date(iso).getTime())/1000);
+}
+function fmtTime(iso){
+  if(!iso) return '';
+  return new Date(iso).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+function prioColor(p){
+  if(p==null) return 'var(--fg-subtle)';
+  if(p<=1) return 'var(--hyper)';
+  if(p<=2) return 'var(--lime)';
+  return 'var(--fg-subtle)';
+}
+
+function lcNodes(sess){
+  // 5 nodes: 0=prepare 1=after_create 2=before_run 3=run-pill 4=done
+  var nodes=[
+    {isPill:false,lbl:'',state:'fut'},
+    {isPill:false,lbl:'',state:'fut'},
+    {isPill:false,lbl:'',state:'fut'},
+    {isPill:true, lbl:'run',state:'fut'},
+    {isPill:false,lbl:'',state:'fut'}
+  ];
+  var pos=0;
+  if(sess._t==='running'){
+    pos=3;
+    nodes[3].lbl='T'+(sess.turn_count||0);
+  } else {
+    var st=sess.stage||'';
+    var hk=sess.hook||'';
+    if(st==='prepare'||st==='preparing_workspace') pos=0;
+    else if(hk==='after_create') pos=1;
+    else if(hk==='before_run') pos=2;
+    else pos=0;
   }
-  if(setup.error){html+='<pre class="setup-error">'+escapeRaw(setup.error)+'</pre>'}
-  return html+'</details>';
+  for(var i=0;i<5;i++){
+    if(i<pos) nodes[i].state='done';
+    else if(i===pos) nodes[i].state='cur';
+    else nodes[i].state='fut';
+  }
+  return nodes;
 }
-function renderAgentTail(rows){
-  if(!rows || rows.length === 0){return ''}
-  return '<div class="tails">'+rows.map(function(row){
-    var messages=row.recent_agent_messages || [];
-    var setup=renderSetup(row);
-    var body=messages.length ? messages.map(function(m){
-      var at=m.at ? new Date(m.at).toLocaleTimeString() : '';
-      return '<div class="chat-msg"><div class="chat-meta">Agent '+escape(at)+'</div><div class="chat-bubble">'+escapeRaw(m.text)+'</div></div>';
-    }).join('') : '<p class="empty">No agent text yet</p>';
-    return '<details open><summary>'+escape(row.issue_identifier || row.issue_id)+'</summary><div class="session-tail">'+setup+'<div class="chat-log">'+body+'</div></div></details>';
-  }).join('')+'</div>';
-}
-function renderQueued(rows){
-  return renderTable((rows || []).slice(0,5),[
-    {label:'Issue',value:function(x){return x.issue_identifier}},
-    {label:'State',value:function(x){return x.state}},
-    {label:'Priority',value:function(x){return x.priority}},
-    {label:'Title',value:function(x){return x.title}},
-    {label:'URL',html:function(x){return renderLink(x.issue_url)}}
-  ])
-}
-function sessionRows(running, setup){
-  var rows=[], seen={};
-  (running || []).forEach(function(row){rows.push(row); seen[row.issue_id]=true});
-  (setup || []).forEach(function(s){
-    if(seen[s.issue_id]){
-      rows.forEach(function(row){if(row.issue_id===s.issue_id && !row.setup){row.setup=s}});
-      return;
+
+function renderTrack(nodes){
+  var h='<div class="lc">';
+  for(var i=0;i<nodes.length;i++){
+    var n=nodes[i],last=i===nodes.length-1;
+    h+='<div class="lc-node">';
+    if(n.isPill){
+      var pc=n.state==='cur'?'lc-pill pill-cur':n.state==='done'?'lc-pill pill-done':'lc-pill pill-fut';
+      h+='<span class="'+pc+'">'+x(n.lbl)+'</span>';
+    } else {
+      var dc=n.state==='cur'?'lc-dot dot-cur':n.state==='done'?'lc-dot dot-done':'lc-dot dot-fut';
+      h+='<span class="'+dc+'"></span>';
     }
-    rows.push({
-      issue_id:s.issue_id,
-      issue_identifier:s.issue_identifier,
-      issue_url:s.issue_url,
-      title:s.title,
-      state:s.state,
-      status:'setup_'+s.status,
-      turn_count:0,
-      last_event:s.stage,
-      tokens:null,
-      log_path:s.log_path,
-      logs:s.logs ? {codex_session_logs:s.logs} : null,
-      workspace:s.workspace || s.failed_workspace,
-      setup:s,
-      recent_agent_messages:[]
-    });
+    if(!last){
+      var lc=n.state==='done'?'lc-line line-done':'lc-line line-fut';
+      h+='<span class="'+lc+'"></span>';
+    }
+    h+='</div>';
+  }
+  return h+'</div>';
+}
+
+function renderCard(sess,open){
+  var id=sess.issue_id||sess.issue_identifier||'';
+  var key=x(sess.issue_identifier||sess.issue_id);
+  var href=sess.issue_url?x(sess.issue_url):'';
+  var title=x(sess.title||'(no title)');
+  var meta='',msg='';
+
+  if(sess._t==='running'){
+    var tk=sess.tokens?fmtTok(sess.tokens.total_tokens):'0';
+    var rt=sess.started_at?fmtRelTime(sess.started_at):'—';
+    meta='turn '+(sess.turn_count||0)+'/20 · '+tk+' tok · '+rt;
+    msg=sess.last_message||sess.last_event||'';
+  } else {
+    var stage=sess.stage||'';
+    var hook=sess.hook||'';
+    meta='preparing'+(stage?' · '+x(stage):'')+(hook?' ('+x(hook)+')':'');
+    msg=sess.status==='failed'?'error: '+x(sess.error||'failed'):x(sess.status||'running');
+  }
+
+  var streamHtml='';
+  if(open){
+    var msgs=sess.recent_agent_messages||[];
+    var rows='';
+    if(msgs.length){
+      var rev=msgs.slice().reverse();
+      for(var i=0;i<rev.length;i++){
+        var m=rev[i];
+        rows+='<div class="act-row"><span class="act-ts">'+x(fmtTime(m.at))+'</span><span class="act-msg">'+x(m.text)+'</span></div>';
+      }
+    } else if(msg){
+      rows='<div class="act-row"><span class="act-ts">'+x(fmtTime(new Date().toISOString()))+'</span><span class="act-msg">'+x(msg)+'</span></div>';
+    } else {
+      rows='<div class="empty">No activity yet</div>';
+    }
+    streamHtml='<div class="act-hdr" onclick="event.stopPropagation()">'
+      +'<div class="act-lbl">Agent activity · newest first · '+msgs.length+' events</div>'
+      +'<div class="act-stream scroll">'+rows+'</div>'
+      +'</div>';
+  }
+
+  var nodes=lcNodes(sess);
+  return '<div class="card" data-id="'+x(id)+'" onclick="toggle(this)">'
+    +'<div class="card-hdr">'
+    +(href?'<a class="lnk iss-key" href="'+href+'" target="_blank" onclick="event.stopPropagation()">'+key+'</a>':'<span class="iss-key">'+key+'</span>')
+    +'<div class="card-right" onclick="event.stopPropagation()"><span class="no-pr">no PR yet</span></div>'
+    +'</div>'
+    +'<div class="card-title">'+title+'</div>'
+    +renderTrack(nodes)
+    +'<div class="card-meta">'+meta+'</div>'
+    +(open?streamHtml:'<div class="card-msg">'+x(msg)+'</div>')
+    +'</div>';
+}
+
+function toggle(el){
+  var id=el.getAttribute('data-id');
+  expandedId=expandedId===id?null:id;
+  renderSessions(lastState);
+}
+
+function sessions(state){
+  var out=[],seen={};
+  (state.running||[]).forEach(function(r){r._t='running';out.push(r);seen[r.issue_id]=true;});
+  (state.setup||[]).forEach(function(s){if(!seen[s.issue_id]){s._t='setup';out.push(s);}});
+  return out;
+}
+
+function renderSessions(state){
+  var ss=sessions(state);
+  document.getElementById('sess-cnt').textContent='· '+ss.length;
+  var h='';
+  ss.forEach(function(s){h+=renderCard(s,expandedId===(s.issue_id||s.issue_identifier||''));});
+  if(!h) h='<div class="empty">No active sessions</div>';
+  document.getElementById('grid').innerHTML=h;
+}
+
+function renderQueued(state){
+  var rows=state.ready||[];
+  document.getElementById('rq-cnt').textContent='· '+rows.length;
+  if(!rows.length){document.getElementById('rq-rows').innerHTML='<div class="empty">Queue is empty</div>';return;}
+  var h='';
+  rows.forEach(function(q){
+    var key=x(q.issue_identifier),href=q.issue_url?x(q.issue_url):'',title=x(q.title||'');
+    h+='<div class="q-row">'
+      +'<span class="prio" style="background:'+prioColor(q.priority)+'"></span>'
+      +'<div class="q-body">'
+      +'<div class="q-top">'
+      +(href?'<a class="lnk" href="'+href+'" target="_blank" style="font-family:var(--font-mono);font-size:11px;">'+key+'</a>':'<span style="font-family:var(--font-mono);font-size:11px;">'+key+'</span>')
+      +'</div>'
+      +'<div class="q-title">'+title+'</div>'
+      +'</div></div>';
   });
-  return rows;
+  document.getElementById('rq-rows').innerHTML=h;
 }
-function renderRunning(rows){
-  return renderTable(rows,[
-    {label:'Issue',className:'col-issue',value:function(x){return x.issue_identifier}},
-    {label:'Title',className:'col-title',value:function(x){return x.title}},
-    {label:'State',className:'col-state',value:function(x){return x.state}},
-    {label:'Turns',className:'col-turns',value:function(x){return x.turn_count}},
-    {label:'Last event',className:'col-event',value:function(x){return x.last_event}},
-    {label:'Total tokens',className:'col-tokens',value:function(x){return tokens(x.tokens)}}
-  ],'sessions-table')+renderAgentTail(rows);
+
+function renderRetry(state){
+  var rows=state.retrying||[];
+  document.getElementById('rr-cnt').textContent='· '+rows.length;
+  if(!rows.length){document.getElementById('rr-rows').innerHTML='<div class="empty">No retries</div>';return;}
+  var h='';
+  rows.forEach(function(r){
+    var key=x(r.issue_identifier),href=r.issue_url?x(r.issue_url):'';
+    var title=x(r.title||'');
+    var next=r.due_at?new Date(r.due_at).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}):'—';
+    var err=x(r.error||'');
+    h+='<div class="r-row">'
+      +'<div style="display:flex;justify-content:space-between;gap:8px;">'
+      +(href?'<a class="lnk r-key" href="'+href+'" target="_blank">'+key+'</a>':'<span class="r-key">'+key+'</span>')
+      +'<span class="r-att">attempt '+r.attempt+'</span>'
+      +'</div>'
+      +'<div class="r-title">'+title+'</div>'
+      +'<div class="r-meta">'+err+(err?' · ':'')+'retry '+next+'</div>'
+      +'</div>';
+  });
+  document.getElementById('rr-rows').innerHTML=h;
 }
-function scrollTailLogs(){
-  document.querySelectorAll('.chat-log').forEach(function(el){el.scrollTop=el.scrollHeight});
+
+function renderDone(state){
+  var cnt=(state.counts&&state.counts.completed)||0;
+  document.getElementById('rd-cnt').textContent='· '+cnt;
+  // Completed session details are not in the snapshot; show count only
+  var h=cnt?'<div class="empty">'+cnt+' completed this run (details not in snapshot)</div>':'<div class="empty">None yet</div>';
+  document.getElementById('rd-rows').innerHTML=h;
 }
+
+function renderKpi(state){
+  var c=state.counts||{},t=state.agent_totals||{};
+  document.getElementById('kv-q').textContent=val(c.ready,'0');
+  document.getElementById('kv-p').textContent=val(c.setup,'0');
+  document.getElementById('kv-r').textContent=val(c.running,'0');
+  document.getElementById('kv-ph').textContent='—';
+  document.getElementById('kv-rt').textContent=val(c.retrying,'0');
+  document.getElementById('kv-d').textContent=val(c.completed,'0');
+  document.getElementById('kv-t').textContent=fmtTok(t.total_tokens||0);
+}
+
+function renderAll(state){
+  if(!state) return;
+  lastState=state;
+  renderKpi(state);
+  renderSessions(state);
+  renderQueued(state);
+  renderRetry(state);
+  renderDone(state);
+  document.getElementById('status-label').textContent='running';
+  document.getElementById('status-ts').textContent=state.generated_at?new Date(state.generated_at).toLocaleString():'';
+}
+
 async function load(){
   try{
-    const r=await fetch('/api/v1/state');
-    const j=await r.json();
-    document.getElementById('status').innerHTML='<span class="ok">running</span> '+new Date(j.generated_at).toLocaleString();
-    document.getElementById('ready-count').textContent=text(j.counts && j.counts.ready);
-    document.getElementById('setup-count').textContent=text(j.counts && j.counts.setup);
-    document.getElementById('running-count').textContent=text(j.counts && j.counts.running);
-    document.getElementById('retrying-count').textContent=text(j.counts && j.counts.retrying);
-    document.getElementById('token-count').textContent=text(j.agent_totals && j.agent_totals.total_tokens);
-    document.getElementById('runtime-count').textContent=text(j.agent_totals && Math.round(j.agent_totals.seconds_running || 0));
-    document.getElementById('queued').innerHTML=renderQueued(j.ready);
-    document.getElementById('running').innerHTML=renderRunning(sessionRows(j.running,j.setup));
-    requestAnimationFrame(scrollTailLogs);
-    document.getElementById('retrying').innerHTML=renderTable(j.retrying,[
-      {label:'Issue',value:function(x){return x.issue_identifier}},
-      {label:'Attempt',value:function(x){return x.attempt}},
-      {label:'Due at',value:function(x){return x.due_at ? new Date(x.due_at).toLocaleString() : ''}},
-      {label:'Error',value:function(x){return x.error}}
-    ]);
-    document.getElementById('rate-limits').textContent=JSON.stringify(j.rate_limits || null,null,2);
-  }catch(e){document.getElementById('status').innerHTML='<span class="bad">offline</span> '+e;}
+    var r=await fetch('/api/v1/state');
+    renderAll(await r.json());
+  }catch(e){
+    document.getElementById('status-label').textContent='offline';
+    document.getElementById('status-ts').textContent=String(e);
+  }
 }
-async function refresh(){await fetch('/api/v1/refresh',{method:'POST'}); await load();}
-load(); setInterval(load,2000);
-	</script>`
+
+async function doRefresh(){
+  await fetch('/api/v1/refresh',{method:'POST'});
+  await load();
+}
+
+load();
+setInterval(load,5000);
+</script>`
