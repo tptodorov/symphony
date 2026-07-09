@@ -586,6 +586,52 @@ func TestCompletedSnapshotRecordsWorkerSuccess(t *testing.T) {
 	}
 }
 
+func TestTerminalReconciliationListsDoneBeforeWorkerExit(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TrackerKind = "linear"
+	cfg.ActiveStates = []string{"Todo"}
+	cfg.TerminalStates = []string{"Done"}
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.Agent.MaxConcurrentAgents = 1
+	issue := domain.Issue{ID: "1", Identifier: "A-1", Title: "Terminal", State: "Todo"}
+	terminal := issue
+	terminal.State = "Done"
+	tr := &trackerfake.Tracker{Issues: []domain.Issue{terminal}}
+	o := New(cfg, tr, &agentfake.Runner{}, workspace.NewManager(cfg.WorkspaceRoot))
+	ctx, cancel := context.WithCancel(context.Background())
+	started := time.Now().Add(-time.Second)
+	o.mu.Lock()
+	o.running[issue.ID] = running{
+		issue:         issue,
+		sessionID:     "A-1-dispatch",
+		workspace:     filepath.Join(cfg.WorkspaceRoot, "A-1"),
+		started:       started,
+		lastEvent:     started,
+		phase:         "agent_run",
+		status:        "running",
+		lastEventType: "session_started",
+		cancel:        cancel,
+		agentTextTail: []AgentTextMessage{{At: started, Event: "message_update", Text: "Finished"}},
+	}
+	o.mu.Unlock()
+
+	if err := o.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("run context was not canceled: %v", ctx.Err())
+	}
+
+	sn := o.Snapshot()
+	if sn.Counts["completed"] != 1 || len(sn.Completed) != 1 {
+		t.Fatalf("terminal reconciliation should list done immediately: counts=%+v completed=%+v", sn.Counts, sn.Completed)
+	}
+	row := sn.Completed[0]
+	if row.IssueIdentifier != "A-1" || row.FinalState != "Done" || row.CompletionReason != "terminal_reconciliation" || len(row.RecentAgentMessages) != 1 {
+		t.Fatalf("completed row = %+v", row)
+	}
+}
+
 func TestBeforeRemoveFailureIsLoggedAndSurfacedWithoutRetry(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.TrackerKind = "linear"

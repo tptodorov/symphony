@@ -886,6 +886,9 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 }
 
 func (o *Orchestrator) recordCompletedLocked(issue domain.Issue, r running, elapsed time.Duration, reason string) {
+	if o.hasCompletedRowLocked(issue) {
+		return
+	}
 	completedAt := time.Now()
 	row := CompletedSnapshot{
 		IssueID:             issue.ID,
@@ -911,6 +914,19 @@ func (o *Orchestrator) recordCompletedLocked(issue domain.Issue, r running, elap
 	if len(o.completedRows) > completedHistoryLimit {
 		o.completedRows = append([]CompletedSnapshot(nil), o.completedRows[len(o.completedRows)-completedHistoryLimit:]...)
 	}
+}
+
+func (o *Orchestrator) hasCompletedRowLocked(issue domain.Issue) bool {
+	for _, row := range o.completedRows {
+		if row.IssueID != issue.ID {
+			continue
+		}
+		if issue.UpdatedAt != nil && issue.UpdatedAt.After(row.CompletedAt) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func (o *Orchestrator) reconcile(ctx context.Context) error {
@@ -952,6 +968,11 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 				r.cancel()
 				o.cancelled[id] = cancellationReason{status: domain.RunAttemptCanceled, completed: true, finalIssue: issue}
 				o.completed[id] = time.Now()
+				elapsed := time.Duration(0)
+				if !r.started.IsZero() {
+					elapsed = now.Sub(r.started)
+				}
+				o.recordCompletedLocked(issue, r, elapsed, "terminal_reconciliation")
 				if o.log != nil {
 					observability.Reconciliation(o.log, id, r.issue.Identifier, "terminal_cancel")
 				}
