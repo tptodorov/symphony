@@ -46,10 +46,11 @@ func TestReadyQueueSnapshotUsesDispatchOrder(t *testing.T) {
 	cfg.Agent.MaxConcurrentAgents = 1
 	p1, p2, p3 := 1, 2, 3
 	u2 := "https://tracker.example/A-2"
+	created := time.Now().Add(-time.Hour)
 	issues := []domain.Issue{
 		{ID: "3", Identifier: "A-3", Title: "Third", State: "Todo", Priority: &p3},
 		{ID: "1", Identifier: "A-1", Title: "First", State: "Todo", Priority: &p1},
-		{ID: "2", Identifier: "A-2", Title: "Second", State: "Todo", Priority: &p2, URL: &u2},
+		{ID: "2", Identifier: "A-2", Title: "Second", State: "Todo", Priority: &p2, URL: &u2, CreatedAt: &created},
 	}
 	tr := &trackerfake.Tracker{Issues: issues}
 	runner := &queueBlockingRunner{started: make(chan struct{}), release: make(chan struct{})}
@@ -76,6 +77,51 @@ func TestReadyQueueSnapshotUsesDispatchOrder(t *testing.T) {
 	}
 	if sn.Ready[0].IssueURL == nil || *sn.Ready[0].IssueURL != u2 || sn.Ready[0].Title != "Second" {
 		t.Fatalf("ready row details = %+v", sn.Ready[0])
+	}
+	if sn.Ready[0].CreatedAt == nil || !sn.Ready[0].CreatedAt.Equal(created) || sn.Ready[0].QueuedSince == nil || sn.Ready[0].WaitSeconds == nil {
+		t.Fatalf("ready row timing missing: %+v", sn.Ready[0])
+	}
+}
+
+func TestJiraCustomJQLReadyQueueStillAppliesEligibility(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TrackerKind = "jira"
+	cfg.TrackerJQL = `project = MOD AND status IN ("To Do", "In Progress") ORDER BY priority ASC, created ASC`
+	cfg.ActiveStates = []string{"To Do", "In Progress"}
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.Agent.MaxConcurrentAgents = 1
+	p1, p2 := 1, 2
+	blockerID, blockerState := "MOD-0", "In Progress"
+	issues := []domain.Issue{
+		{ID: "1", Identifier: "MOD-1", Title: "Running", State: "In Progress", Priority: &p1},
+		{ID: "2", Identifier: "MOD-2", Title: "Queued", State: "To Do", Priority: &p2, BlockedBy: []domain.BlockerRef{{Identifier: &blockerID, State: &blockerState}}},
+	}
+	tr := &trackerfake.Tracker{Issues: issues}
+	runner := &queueBlockingRunner{started: make(chan struct{}), release: make(chan struct{})}
+	o := New(cfg, tr, runner, workspace.NewManager(cfg.WorkspaceRoot))
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	defer close(runner.release)
+
+	sn := o.Snapshot()
+	if sn.Counts["ready"] != 0 || len(sn.Ready) != 0 {
+		t.Fatalf("custom JQL ready queue = %+v counts=%+v", sn.Ready, sn.Counts)
+	}
+
+	issues[1].State = "In Progress"
+	tr.Issues = issues
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sn = o.Snapshot()
+	if sn.Counts["ready"] != 0 || len(sn.Ready) != 0 {
+		t.Fatalf("blocked non-To Do issue should not be ready: %+v counts=%+v", sn.Ready, sn.Counts)
 	}
 }
 
@@ -184,8 +230,12 @@ func TestForwardEventsDoesNotDoubleCountAcrossNonUsageEvents(t *testing.T) {
 
 func TestRunningSnapshotIncludesLogsAndAgentTextTail(t *testing.T) {
 	cfg := config.Defaults()
+	cfg.Agent.MaxTurns = 7
 	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
-	started := time.Now()
+	o.SetPullRequestResolver(staticPRResolver{byIdentifier: map[string]*PullRequestSnapshot{
+		"A-1": {Provider: "github", Number: 42, URL: "https://github.com/owner/repo/pull/42", State: "mergeable", Match: "identifier_search"},
+	}})
+	started := time.Now().Add(-2 * time.Second)
 	logs := domain.RunLogPaths{Protocol: filepath.Join(t.TempDir(), "protocol.jsonl"), Stderr: filepath.Join(t.TempDir(), "stderr.log"), Result: filepath.Join(t.TempDir(), "result.json")}
 	o.mu.Lock()
 	o.running["1"] = running{
@@ -194,9 +244,11 @@ func TestRunningSnapshotIncludesLogsAndAgentTextTail(t *testing.T) {
 		workspace:     filepath.Join(t.TempDir(), "A-1"),
 		started:       started,
 		lastEvent:     started,
+		phase:         "agent_run",
 		status:        "running",
 		lastEventType: "session_started",
 		logs:          logs,
+		maxTurns:      cfg.Agent.MaxTurns,
 	}
 	o.mu.Unlock()
 
@@ -216,8 +268,24 @@ func TestRunningSnapshotIncludesLogsAndAgentTextTail(t *testing.T) {
 	if running.LogPath != logs.Protocol || running.Logs == nil || len(running.Logs.CodexSessionLogs) != 3 {
 		t.Fatalf("logs missing from running snapshot: %+v", running)
 	}
+	if running.Phase != "agent_run" || running.MaxTurns != cfg.Agent.MaxTurns || running.RuntimeSeconds <= 0 {
+		t.Fatalf("runtime fields missing from running snapshot: %+v", running)
+	}
+	if running.PullRequest == nil || running.PullRequest.Number != 42 || running.PullRequest.Match != "identifier_search" {
+		t.Fatalf("pull request missing from running snapshot: %+v", running.PullRequest)
+	}
 	if len(running.RecentAgentMessages) != 100 {
 		t.Fatalf("tail length = %d", len(running.RecentAgentMessages))
+	}
+	if sn.RuntimeConfig == nil || sn.RuntimeConfig.AgentMaxTurns != cfg.Agent.MaxTurns || sn.RuntimeConfig.DashboardRefreshMS != 5000 {
+		t.Fatalf("runtime config missing from snapshot: %+v", sn.RuntimeConfig)
+	}
+	if sn.AgentTotals == nil || sn.AgentTotals.SecondsRunning <= 0 {
+		t.Fatalf("live agent totals missing running seconds: %+v", sn.AgentTotals)
+	}
+	detail, ok := o.IssueSnapshot("A-1")
+	if !ok || detail.Running == nil || detail.Running.PullRequest == nil || detail.Running.PullRequest.Number != 42 {
+		t.Fatalf("pull request missing from issue detail: ok=%v detail=%+v", ok, detail)
 	}
 }
 
@@ -327,6 +395,19 @@ func (r *promptCapturingRunner) Run(ctx context.Context, req agent.RunRequest, e
 	}
 }
 
+type staticPRResolver struct {
+	byIdentifier map[string]*PullRequestSnapshot
+}
+
+func (r staticPRResolver) LookupPullRequest(_ context.Context, issue domain.Issue) (*PullRequestSnapshot, error) {
+	pr := r.byIdentifier[issue.Identifier]
+	if pr == nil {
+		return nil, nil
+	}
+	cp := *pr
+	return &cp, nil
+}
+
 func TestBackoff(t *testing.T) {
 	if got := backoff(3, 30*time.Second); got != 30*time.Second {
 		t.Fatal(got)
@@ -385,6 +466,185 @@ func TestSetupSnapshotVisibleDuringWorkspacePreparation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("tick did not finish")
+	}
+}
+
+func TestAfterRunHookIsVisibleInSnapshot(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TrackerKind = "linear"
+	cfg.ActiveStates = []string{"Todo"}
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.Agent.MaxConcurrentAgents = 1
+	tmp := t.TempDir()
+	started := filepath.Join(tmp, "started")
+	release := filepath.Join(tmp, "release")
+	cfg.Hooks.AfterRun = fmt.Sprintf("touch %q; while [ ! -f %q ]; do sleep 0.01; done", started, release)
+	tr := &trackerfake.Tracker{Issues: []domain.Issue{{ID: "1", Identifier: "A-1", Title: "Post run", State: "Todo"}}}
+	runner := &agentfake.Runner{Result: agent.Result{Completed: true}}
+	o := New(cfg, tr, runner, workspace.NewManager(cfg.WorkspaceRoot))
+
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	})
+
+	sn := o.Snapshot()
+	if sn.Counts["post_run_hooks"] != 1 || sn.Counts["running"] != 0 || len(sn.Running) != 1 {
+		t.Fatalf("after_run hook not visible: counts=%+v running=%+v", sn.Counts, sn.Running)
+	}
+	if sn.Running[0].Phase != "after_run" || sn.Running[0].Status != "running" {
+		t.Fatalf("unexpected after_run row: %+v", sn.Running[0])
+	}
+
+	if err := os.WriteFile(release, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool {
+		return len(o.Snapshot().Completed) == 1
+	})
+	sn = o.Snapshot()
+	if sn.Counts["post_run_hooks"] != 1 || len(sn.Running) != 1 || sn.Running[0].Phase != "after_run" || sn.Running[0].Status != "completed" {
+		t.Fatalf("completed after_run row should be retained briefly: counts=%+v running=%+v", sn.Counts, sn.Running)
+	}
+}
+
+func TestAfterRunFailureIsLoggedSurfacedAndIgnored(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TrackerKind = "linear"
+	cfg.ActiveStates = []string{"Todo"}
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.Agent.MaxConcurrentAgents = 1
+	cfg.Hooks.AfterRun = "echo after run failed; exit 2"
+	tr := &trackerfake.Tracker{Issues: []domain.Issue{{ID: "1", Identifier: "A-1", Title: "Post run failure", State: "Todo"}}}
+	runner := &agentfake.Runner{Result: agent.Result{Completed: true}}
+	var logs bytes.Buffer
+	o := NewWithLogger(cfg, tr, runner, workspace.NewManager(cfg.WorkspaceRoot), observability.NewLogger(&logs))
+
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool {
+		return len(o.Snapshot().Completed) == 1
+	})
+
+	sn := o.Snapshot()
+	if sn.Counts["completed"] != 1 || sn.Counts["post_run_hooks"] != 1 || len(sn.Running) != 1 {
+		t.Fatalf("after_run failure should complete and retain hook row: counts=%+v running=%+v completed=%+v", sn.Counts, sn.Running, sn.Completed)
+	}
+	if sn.Running[0].Phase != "after_run" || sn.Running[0].Status != "failed" || !strings.Contains(sn.Running[0].Error, "after run failed") {
+		t.Fatalf("after_run failure not surfaced: %+v", sn.Running[0])
+	}
+	logText := logs.String()
+	for _, want := range []string{`"msg":"workflow hook started"`, `"hook":"after_run"`, `"msg":"workflow hook failed"`, "after run failed"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("after_run log missing %q in logs:\n%s", want, logText)
+		}
+	}
+}
+
+func TestCompletedSnapshotRecordsWorkerSuccess(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Agent.MaxTurns = 9
+	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
+	issueURL := "https://tracker.example/A-1"
+	issue := domain.Issue{ID: "1", Identifier: "A-1", Title: "Done issue", State: "Todo", URL: &issueURL}
+	started := time.Now().Add(-3 * time.Second)
+	o.mu.Lock()
+	o.running[issue.ID] = running{
+		issue:         issue,
+		sessionID:     "A-1-dispatch",
+		workspace:     filepath.Join(t.TempDir(), "A-1"),
+		started:       started,
+		lastEvent:     started,
+		phase:         "agent_run",
+		status:        "running",
+		lastEventType: "session_started",
+		turnCount:     3,
+		maxTurns:      cfg.Agent.MaxTurns,
+		agentTextTail: []AgentTextMessage{{At: started, Event: "message_update", Text: "Finished"}},
+	}
+	o.mu.Unlock()
+
+	o.workerExit(issue, agent.Result{Completed: true, Usage: domain.TokenUsage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18}}, 3*time.Second)
+
+	sn := o.Snapshot()
+	if sn.Counts["completed"] != 1 || len(sn.Completed) != 1 {
+		t.Fatalf("completed row missing: counts=%+v completed=%+v", sn.Counts, sn.Completed)
+	}
+	row := sn.Completed[0]
+	if row.IssueIdentifier != "A-1" || row.Title != "Done issue" || row.IssueURL == nil || *row.IssueURL != issueURL {
+		t.Fatalf("completed issue fields missing: %+v", row)
+	}
+	if row.CompletionReason != "worker_completed" || row.TurnCount != 3 || row.MaxTurns != cfg.Agent.MaxTurns || row.RuntimeSeconds != 3 {
+		t.Fatalf("completed run fields missing: %+v", row)
+	}
+	if row.Tokens == nil || row.Tokens.TotalTokens != 18 || len(row.RecentAgentMessages) != 1 || row.RecentAgentMessages[0].Text != "Finished" {
+		t.Fatalf("completed token/activity fields missing: %+v", row)
+	}
+}
+
+func TestBeforeRemoveFailureIsLoggedAndSurfacedWithoutRetry(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TrackerKind = "linear"
+	cfg.ActiveStates = []string{"Todo"}
+	cfg.TerminalStates = []string{"Done"}
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.Hooks.BeforeRemove = "echo cleanup failed; exit 2"
+	issue := domain.Issue{ID: "1", Identifier: "A-1", Title: "Terminal", State: "Todo"}
+	terminal := issue
+	terminal.State = "Done"
+	tr := &trackerfake.Tracker{Issues: []domain.Issue{terminal}}
+	wm := workspace.NewManager(cfg.WorkspaceRoot)
+	if _, _, err := wm.CreateForIssue(issue.Identifier); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	o := NewWithLogger(cfg, tr, &agentfake.Runner{}, wm, observability.NewLogger(&logs))
+	ctx, cancel := context.WithCancel(context.Background())
+	started := time.Now().Add(-time.Second)
+	o.mu.Lock()
+	o.running[issue.ID] = running{
+		issue:         issue,
+		sessionID:     "A-1-dispatch",
+		workspace:     filepath.Join(cfg.WorkspaceRoot, "A-1"),
+		started:       started,
+		lastEvent:     started,
+		phase:         "agent_run",
+		status:        "running",
+		lastEventType: "session_started",
+		cancel:        cancel,
+	}
+	o.mu.Unlock()
+
+	if err := o.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("run context was not canceled: %v", ctx.Err())
+	}
+	waitFor(t, time.Second, func() bool {
+		sn := o.Snapshot()
+		return len(sn.Running) == 1 && sn.Running[0].Phase == "before_remove" && sn.Running[0].Status == "failed"
+	})
+
+	sn := o.Snapshot()
+	if sn.Counts["post_run_hooks"] != 1 || sn.Counts["running"] != 0 || !strings.Contains(sn.Running[0].Error, "before_remove failed") {
+		t.Fatalf("before_remove failure not surfaced: counts=%+v running=%+v", sn.Counts, sn.Running)
+	}
+	logText := logs.String()
+	for _, want := range []string{`"msg":"workflow hook started"`, `"hook":"before_remove"`, `"msg":"workflow hook failed"`, "cleanup failed"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("before_remove log missing %q in logs:\n%s", want, logText)
+		}
+	}
+
+	o.workerExit(issue, agent.Result{Err: ctx.Err()}, time.Second)
+	sn = o.Snapshot()
+	if sn.Counts["retrying"] != 0 || sn.Counts["completed"] != 1 || len(sn.Completed) != 1 {
+		t.Fatalf("before_remove failure should not retry or block completion: counts=%+v completed=%+v", sn.Counts, sn.Completed)
 	}
 }
 

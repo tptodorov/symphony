@@ -62,7 +62,10 @@ func IssueIsEligible(issue Issue, cfg EffectiveConfig) bool {
 		}
 	}
 	state := NormalizeState(issue.State)
-	if containsNorm(cfg.TerminalStates, state) || !containsNorm(cfg.ActiveStates, state) {
+	if containsNorm(cfg.TerminalStates, state) {
+		return false
+	}
+	if !containsNorm(cfg.ActiveStates, state) {
 		return false
 	}
 	labels := NormalizeLabels(issue.Labels)
@@ -71,11 +74,9 @@ func IssueIsEligible(issue Issue, cfg EffectiveConfig) bool {
 			return false
 		}
 	}
-	if state == "todo" || state == "to do" {
-		for _, b := range issue.BlockedBy {
-			if b.State == nil || !containsNorm(cfg.TerminalStates, NormalizeState(*b.State)) {
-				return false
-			}
+	for _, b := range issue.BlockedBy {
+		if b.State == nil || !containsNorm(cfg.TerminalStates, NormalizeState(*b.State)) {
+			return false
 		}
 	}
 	return true

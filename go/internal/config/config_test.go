@@ -11,12 +11,12 @@ import (
 func TestResolveValidate(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "secret")
 	wf := domain.WorkflowDefinition{Config: map[string]any{
-		"tracker":   map[string]any{"kind": "linear", "api_key": "$LINEAR_API_KEY", "project_slug": "p"},
+		"tracker":   map[string]any{"kind": "linear", "api_key": "$LINEAR_API_KEY", "project_slug": "p", "active_states": []any{"ready"}, "terminal_states": []any{"done"}},
 		"workspace": map[string]any{"root": "work"},
-		"agent":     map[string]any{"per_state_concurrency": map[string]any{"Todo": 2, "Bad": 0}},
+		"agent":     map[string]any{"per_state_concurrency": map[string]any{"ready": 2, "bad": 0}},
 	}}
 	cfg, err := Resolve(wf, filepath.Join(t.TempDir(), "WORKFLOW.md"))
-	if err != nil || cfg.TrackerAPIKey != "secret" || !filepath.IsAbs(cfg.WorkspaceRoot) || cfg.PerStateConcurrency["todo"] != 2 || cfg.PerStateConcurrency["bad"] != 0 {
+	if err != nil || cfg.TrackerAPIKey != "secret" || !filepath.IsAbs(cfg.WorkspaceRoot) || cfg.PerStateConcurrency["ready"] != 2 || cfg.PerStateConcurrency["bad"] != 0 {
 		t.Fatalf("%+v %v", cfg, err)
 	}
 	if err := Validate(cfg); err != nil {
@@ -44,20 +44,22 @@ func TestResolveJira(t *testing.T) {
 	t.Setenv("JIRA_TOKEN", "token")
 	wf := domain.WorkflowDefinition{Config: map[string]any{
 		"tracker": map[string]any{
-			"kind":        "jira",
-			"endpoint":    "https://example.atlassian.net",
-			"email":       "user@example.com",
-			"api_token":   "$JIRA_TOKEN",
-			"project_key": "MOD",
-			"jql":         "project = MOD",
-			"page_size":   25,
+			"kind":            "jira",
+			"endpoint":        "https://example.atlassian.net",
+			"email":           "user@example.com",
+			"api_token":       "$JIRA_TOKEN",
+			"project_key":     "MOD",
+			"jql":             "project = MOD",
+			"page_size":       25,
+			"active_states":   []any{"ready"},
+			"terminal_states": []any{"done"},
 		},
 	}}
 	cfg, err := Resolve(wf, filepath.Join(t.TempDir(), "WORKFLOW.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.TrackerAPIKey != "token" || cfg.TrackerEmail != "user@example.com" || cfg.TrackerProjectKey != "MOD" || cfg.TrackerJQL != "project = MOD" || cfg.TrackerPageSize != 25 {
+	if cfg.TrackerAPIKey != "token" || cfg.TrackerEmail != "user@example.com" || cfg.TrackerProjectKey != "MOD" || cfg.TrackerJQL != "project = MOD" || cfg.TrackerPageSize != 25 || !cfg.EnableJiraREST {
 		t.Fatalf("%+v", cfg)
 	}
 	if err := Validate(cfg); err != nil {
@@ -68,11 +70,13 @@ func TestResolveJira(t *testing.T) {
 func TestResolveJiraAliases(t *testing.T) {
 	wf := domain.WorkflowDefinition{Config: map[string]any{
 		"tracker": map[string]any{
-			"kind":         "jira",
-			"endpoint":     "https://example.atlassian.net",
-			"email":        "user@example.com",
-			"api_key":      "token",
-			"project_slug": "MOD",
+			"kind":            "jira",
+			"endpoint":        "https://example.atlassian.net",
+			"email":           "user@example.com",
+			"api_key":         "token",
+			"project_slug":    "MOD",
+			"active_states":   []any{"ready"},
+			"terminal_states": []any{"done"},
 		},
 	}}
 	cfg, err := Resolve(wf, filepath.Join(t.TempDir(), "WORKFLOW.md"))
@@ -155,5 +159,43 @@ func TestResolveServerPortPresence(t *testing.T) {
 	cfg.ServerPort = -1
 	if err := Validate(cfg); err == nil {
 		t.Fatal("expected negative server.port to be invalid")
+	}
+}
+
+func TestResolvePullRequestProviderConfig(t *testing.T) {
+	t.Setenv("GH_TOKEN", "from-env")
+	workflowPath := filepath.Join(t.TempDir(), "WORKFLOW.md")
+	cfg, err := Resolve(domain.WorkflowDefinition{Config: map[string]any{
+		"server": map[string]any{
+			"pull_requests": map[string]any{
+				"provider":          "github",
+				"github_repository": "owner/repo",
+				"cache_ttl_ms":      2500,
+			},
+		},
+	}}, workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PullRequests.Provider != "github" || cfg.PullRequests.GitHubRepository != "owner/repo" || cfg.PullRequests.GitHubToken != "from-env" || cfg.PullRequests.CacheTTL.Milliseconds() != 2500 {
+		t.Fatalf("unexpected pull request config: %+v", cfg.PullRequests)
+	}
+	if err := Validate(cfg); err == nil {
+		t.Fatal("expected tracker validation errors")
+	}
+
+	cfg, err = Resolve(domain.WorkflowDefinition{Config: map[string]any{
+		"server": map[string]any{
+			"pull_requests": map[string]any{
+				"provider":   "local",
+				"local_path": "prs.json",
+			},
+		},
+	}}, workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PullRequests.Provider != "local" || cfg.PullRequests.LocalPath != filepath.Join(filepath.Dir(workflowPath), "prs.json") {
+		t.Fatalf("unexpected local pull request config: %+v", cfg.PullRequests)
 	}
 }

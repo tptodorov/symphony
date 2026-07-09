@@ -435,6 +435,9 @@ Fields:
 - `jql` (string)
   - OPTIONAL custom Jira candidate query for `tracker.kind == "jira"`.
   - When present, this query fully replaces the default Jira candidate query.
+  - Candidate rows returned by the query are still filtered by the generic dispatch eligibility
+    rules, including `tracker.active_states`, `tracker.terminal_states`, assignee, labels, and
+    blocker readiness.
   - It does not replace state-refresh or terminal-cleanup queries unless an implementation documents
     an additional tracker-specific extension.
   - NOT used for `tracker.kind == "linear"` or `tracker.kind == "beads"`.
@@ -458,13 +461,11 @@ Fields:
   - For `tracker.kind == "beads"`, labels are Beads tags normalized into `issue.labels`.
 - `active_states` (list of strings)
   - Default: `Todo`, `In Progress` for `linear` and `jira`; `open`, `in_progress` for `beads`.
-  - Implementations SHOULD provide tracker-kind-specific defaults that match the tracker's native
-    state vocabulary.
+  - Eligibility logic MUST use this configured list rather than hardcoding state-name checks.
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done` for `linear` and `jira`;
     `closed`, `tombstone` for `beads`.
-  - Implementations SHOULD provide tracker-kind-specific defaults that match the tracker's native
-    state vocabulary.
+  - Eligibility logic MUST use this configured list rather than hardcoding state-name checks.
 - `bd_command` (string)
   - Shell command for the `bd` CLI.
   - Default: `bd`.
@@ -777,8 +778,8 @@ not require recognizing or validating extension fields unless that extension is 
   - `tracker.assignee`: optional string; when set, candidates must match tracker assignee/owner
   - `tracker.required_labels`: list of strings, default `[]` (Linear labels, Jira labels, or Beads
     tags)
-  - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]` for Linear,
-    `["Todo", "In Progress"]` for Jira, `["open", "in_progress"]` for Beads
+  - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]` for Linear and
+    Jira, `["open", "in_progress"]` for Beads
   - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled",
     "Duplicate", "Done"]` for Linear and Jira, `["closed", "tombstone"]` for Beads
 - `polling.interval_ms`: integer, default `30000`
@@ -944,8 +945,8 @@ An issue is dispatch-eligible only if all are true:
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
-- Blocker rule for `Todo` state passes:
-  - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
+- Blocker readiness passes:
+  - Do not dispatch when any blocker is absent from `terminal_states`.
 
 Sorting order (stable intent):
 
@@ -2105,6 +2106,129 @@ RECOMMENDED snapshot error modes:
 - `timeout`
 - `unavailable`
 
+#### 13.3.1 Dashboard Snapshot Rows
+
+The synchronous snapshot remains OPTIONAL for core conformance. If an implementation ships the HTTP
+server extension in Section 13.7, its `/api/v1/state` response MUST provide the dashboard snapshot
+fields in this section unless a field is explicitly marked OPTIONAL.
+
+Requirements:
+
+- Snapshot data MUST be observability-only. It MUST NOT be required for dispatch, retry scheduling,
+  reconciliation, workspace cleanup, or coding-agent correctness.
+- Snapshot rows MUST use real orchestrator, tracker, hook, agent, or configured extension data.
+  Implementations MUST NOT fabricate PRs, token counts, runtime, hook phases, or completed work rows
+  to satisfy a dashboard layout.
+- Snapshot consumers MUST be able to render the active lifecycle using this phase order:
+  - `prepare`
+  - `after_create`
+  - `before_run`
+  - `agent_run`
+  - `after_run`
+  - `before_remove`
+  - `completed`
+- A row enters `before_remove` only when the implementation is actually removing a workspace. Normal
+  successful handoff runs MAY skip directly from `after_run` to `completed`.
+- `after_run` and `before_remove` hook failures remain governed by Section 9.4: they are logged and
+  surfaced to operators but do not by themselves fail or retry the agent run.
+
+Common row fields:
+
+- `issue_id`
+- `issue_identifier`
+- `issue_url` when the tracker supplies one
+- `title` when known
+- `state` when known
+- `phase` when the row represents lifecycle progress
+- `status` when the row represents an active, completed, or failed phase
+- `started_at` when known
+- `updated_at` or `completed_at` when known
+- `max_turns` when the row displays turn progress and the effective value is known
+- `pull_request` when an OPTIONAL PR metadata extension has real data
+
+`runtime_config`:
+
+- HTTP snapshots MUST include dashboard-relevant effective runtime settings when known.
+- `agent_max_turns` is REQUIRED and contains the effective `agent.max_turns`.
+- `dashboard_refresh_ms` is OPTIONAL and contains the dashboard auto-refresh interval when that
+  interval is implementation-defined or configurable.
+
+`ready` rows:
+
+- MUST include issue identity and dispatch ordering.
+- SHOULD include `created_at` from the tracker when known.
+- SHOULD include `queued_since` when the implementation tracks when the issue first entered the
+  local ready queue.
+- MAY include computed `wait_seconds`.
+- Missing timing fields mean the dashboard should omit or de-emphasize queue wait time rather than
+  invent it.
+
+`setup` rows:
+
+- MUST include pre-agent setup state for workspace preparation, `after_create`, `before_run`, prompt
+  rendering, and setup failures that are waiting in retry backoff.
+- MUST include `phase` using `prepare`, `after_create`, or `before_run` where that mapping is known.
+- MAY retain a more granular implementation-specific `stage` field such as `preparing_workspace` or
+  `building_prompt`.
+- SHOULD include hook name, workspace path, failed workspace path, setup error text, and setup
+  diagnostic log paths when known.
+
+`running` rows:
+
+- MUST include `phase: "agent_run"`.
+- MUST include `turn_count`.
+- MUST include `max_turns` directly or through `runtime_config.agent_max_turns`.
+- SHOULD include `started_at` and `runtime_seconds` when known.
+- SHOULD include current per-session token counts when known.
+- SHOULD include `last_event`, `last_message`, raw log paths, and a bounded human-readable agent
+  message tail.
+
+Post-run hook rows:
+
+- Implementations that run `after_run` or `before_remove` hooks SHOULD surface those hooks as active
+  rows while they are running.
+- Rows MUST use `phase: "after_run"` or `phase: "before_remove"` as appropriate.
+- Rows SHOULD remain visible briefly after completion or failure so a polling dashboard can observe
+  the transition.
+- `counts.post_run_hooks` MUST count rows currently in `after_run` or `before_remove` phases when
+  the implementation tracks them; otherwise it MUST be `0`.
+
+`retrying` rows:
+
+- MUST include `issue_id`, `issue_identifier`, `attempt`, `due_at`, and the latest retry error when
+  present.
+- SHOULD include `title`, `state`, and `issue_url` when known.
+- SHOULD include the latest setup snapshot when the retry was caused by setup failure.
+- MAY include `pull_request` when the OPTIONAL PR metadata extension has real data.
+
+`completed` rows:
+
+- HTTP snapshots MUST expose a bounded completion history suitable for a dashboard "Done today"
+  rail.
+- A row is added when a worker exits successfully or when a running issue is reconciled into a
+  terminal tracker state.
+- "Today" is the Symphony process's local calendar day unless the implementation documents another
+  operator-facing timezone.
+- Completion history is observability state. It MUST NOT replace the `completed` bookkeeping set used
+  for dispatch gating.
+- In-memory completion history is sufficient. Persistence across restart is OPTIONAL and
+  implementation-defined.
+- Completed rows SHOULD include issue identity, title, tracker URL, final tracker state when known,
+  completion reason, `turn_count`, final tokens, `runtime_seconds`, `completed_at`, recent agent
+  message tail, and OPTIONAL PR metadata when real data exists.
+
+Agent message/event history:
+
+- Running and completed rows SHOULD include `recent_agent_messages`, capped at 100 messages per row
+  by default.
+- Each message SHOULD include `at`, `event`, and `text`.
+- Implementations MUST keep message ordering stable within one API version and include timestamps so
+  dashboards can render newest-first streams.
+- A bounded in-memory event/message history is sufficient. Durable event history is OPTIONAL and
+  implementation-defined.
+- Implementations MAY expose `GET /api/v1/<issue_identifier>/events?limit=100` for deeper inspection
+  or to keep `/api/v1/state` smaller. This endpoint is OPTIONAL.
+
 ### 13.4 OPTIONAL Human-Readable Status Surface
 
 A human-readable status surface (terminal output, dashboard, etc.) is OPTIONAL and
@@ -2192,6 +2316,9 @@ Enablement (extension):
 - Host a human-readable dashboard at `/`.
 - The returned document SHOULD depict the current state of the system (for example active sessions,
   retry delays, token consumption, runtime totals, recent events, and health/error indicators).
+- The dashboard SHOULD render the lifecycle phases defined in Section 13.3.1 from real snapshot
+  phases. It SHOULD omit, gray, or mark unavailable phases that the implementation does not report
+  rather than inventing phase progress.
 - The dashboard SHOULD expose the current pending ready-work count before the running count.
 - The dashboard SHOULD include a Queued Work or equivalent section above Running Sessions.
   - The queued section SHOULD show the next pending ready issues in the same order the scheduler uses
@@ -2213,6 +2340,10 @@ Enablement (extension):
   - The text tail SHOULD include at most 100 messages per running job.
   - The dashboard SHOULD refresh this section automatically; short polling of the JSON API is
     sufficient and streaming transport is not required.
+- The dashboard SHOULD include a Completed or Done today section backed by snapshot `completed`
+  rows.
+- If OPTIONAL PR metadata is unavailable, the dashboard SHOULD omit PR chips or show a neutral
+  "no PR yet" affordance rather than constructing PR links from issue identifiers or agent text.
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.
 
@@ -2234,7 +2365,13 @@ Minimum endpoints:
         "ready": 1,
         "setup": 1,
         "running": 2,
-        "retrying": 1
+        "post_run_hooks": 0,
+        "retrying": 1,
+        "completed": 1
+      },
+      "runtime_config": {
+        "agent_max_turns": 20,
+        "dashboard_refresh_ms": 5000
       },
       "ready": [
         {
@@ -2243,7 +2380,10 @@ Minimum endpoints:
           "issue_url": "https://tracker.example/issues/MT-651",
           "title": "Add queued work visibility",
           "state": "Todo",
-          "priority": 1
+          "priority": 1,
+          "created_at": "2026-02-24T19:50:00Z",
+          "queued_since": "2026-02-24T20:12:00Z",
+          "wait_seconds": 210
         }
       ],
       "setup": [
@@ -2254,6 +2394,7 @@ Minimum endpoints:
           "title": "Prepare workspace visibility",
           "state": "In Progress",
           "attempt": 0,
+          "phase": "after_create",
           "stage": "after_create",
           "status": "failed",
           "hook": "after_create",
@@ -2279,12 +2420,15 @@ Minimum endpoints:
           "issue_url": "https://tracker.example/issues/MT-649",
           "title": "Implement queued work visibility",
           "state": "In Progress",
+          "phase": "agent_run",
           "session_id": "thread-1-turn-1",
           "turn_count": 7,
+          "max_turns": 20,
           "last_event": "turn_completed",
           "last_message": "",
           "log_path": "/var/log/symphony/agents/MT-649/thread-1-turn-1/protocol.jsonl",
           "started_at": "2026-02-24T20:10:12Z",
+          "runtime_seconds": 287.0,
           "last_event_at": "2026-02-24T20:14:59Z",
           "recent_agent_messages": [
             {
@@ -2298,9 +2442,11 @@ Minimum endpoints:
             "output_tokens": 800,
             "total_tokens": 2000
           },
+          "pull_request": null,
           "setup": {
             "issue_id": "abc123",
             "issue_identifier": "MT-649",
+            "phase": "before_run",
             "stage": "building_prompt",
             "status": "completed",
             "workspace": "/tmp/symphony_workspaces/MT-649",
@@ -2313,12 +2459,16 @@ Minimum endpoints:
           "issue_id": "def456",
           "issue_identifier": "MT-650",
           "issue_url": "https://tracker.example/issues/MT-650",
+          "title": "Retry failed setup visibility",
+          "state": "In Progress",
           "attempt": 3,
           "due_at": "2026-02-24T20:16:00Z",
           "error": "hook failed: exit status 2",
+          "pull_request": null,
           "setup": {
             "issue_id": "def456",
             "issue_identifier": "MT-650",
+            "phase": "after_create",
             "stage": "after_create",
             "status": "failed",
             "hook": "after_create",
@@ -2327,6 +2477,27 @@ Minimum endpoints:
             "log_path": "/tmp/symphony_workspaces/.failed/MT-650-123/prepare-error.txt",
             "updated_at": "2026-02-24T20:15:10Z"
           }
+        }
+      ],
+      "completed": [
+        {
+          "issue_id": "mno345",
+          "issue_identifier": "MT-648",
+          "issue_url": "https://tracker.example/issues/MT-648",
+          "title": "Ship completed row visibility",
+          "final_state": "Human Review",
+          "completion_reason": "worker_completed",
+          "turn_count": 9,
+          "max_turns": 20,
+          "tokens": {
+            "input_tokens": 1800,
+            "output_tokens": 900,
+            "total_tokens": 2700
+          },
+          "runtime_seconds": 2280.0,
+          "completed_at": "2026-02-24T14:02:00Z",
+          "recent_agent_messages": [],
+          "pull_request": null
         }
       ],
       "agent_totals": {
@@ -2359,8 +2530,11 @@ Minimum endpoints:
       "running": {
         "session_id": "thread-1-turn-1",
         "turn_count": 7,
+        "max_turns": 20,
         "state": "In Progress",
+        "phase": "agent_run",
         "started_at": "2026-02-24T20:10:12Z",
+        "runtime_seconds": 287.0,
         "last_event": "notification",
         "last_message": "Working on tests",
         "last_event_at": "2026-02-24T20:14:59Z",
@@ -2398,6 +2572,7 @@ Minimum endpoints:
       "setup": {
         "issue_id": "abc123",
         "issue_identifier": "MT-649",
+        "phase": "before_run",
         "stage": "building_prompt",
         "status": "completed",
         "workspace": "/tmp/symphony_workspaces/MT-649",
@@ -2425,6 +2600,17 @@ Minimum endpoints:
     }
     ```
 
+Optional endpoints:
+
+- `GET /api/v1/<issue_identifier>/events?limit=100`
+  - Returns a bounded issue event/message history for deeper debugging or richer activity streams.
+  - The `limit` parameter SHOULD be capped by the implementation. This implementation caps it at
+    `100` and uses `100` when the query value is missing or invalid.
+  - The response includes issue identity, `limit`, `truncated`, `recent_events`, and
+    `recent_agent_messages`.
+  - This endpoint is OPTIONAL; `/api/v1/state` remains sufficient for a conforming dashboard when it
+    includes capped `recent_agent_messages`.
+
 API design notes:
 
 - The JSON shapes above are the RECOMMENDED baseline for interoperability and debugging ergonomics.
@@ -2434,6 +2620,97 @@ API design notes:
 - API errors SHOULD use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it SHOULD consume this API rather than duplicating state
   logic.
+
+#### 13.7.3 OPTIONAL Pull Request Metadata Extension
+
+The HTTP/status surface MAY enrich snapshot rows with pull request metadata. This extension is
+OPTIONAL and is not part of the core scheduler/tracker-reader contract.
+
+Requirements:
+
+- PR metadata MUST be sourced from a real provider integration or a documented deterministic local
+  source.
+- PR lookup failures MUST NOT fail startup, dispatch, retries, reconciliation, hook execution, or
+  agent runs. They SHOULD be visible as observability warnings when practical.
+- Implementations MUST NOT parse agent messages, raw logs, or free-form stdout to discover pull
+  requests for the server snapshot.
+- Provider authentication and cache behavior are implementation-defined and MUST be documented when
+  this extension is enabled.
+- Implementations MAY define additional `server` config fields for this extension, such as provider
+  name, repository, cache TTL, or matching policy.
+
+Implemented config:
+
+- `server.pull_requests.provider`:
+  - OPTIONAL.
+  - Supported values: `github`, `local`, `none`, or empty.
+  - Empty and `none` disable PR enrichment.
+- `server.pull_requests.github_repository`:
+  - REQUIRED when provider is `github`.
+  - Uses `owner/repo` format.
+- `server.pull_requests.github_token`:
+  - OPTIONAL when provider is `github`.
+  - MAY be a literal token or `$VAR_NAME`.
+  - When omitted, the implementation reads `GITHUB_TOKEN`, then `GH_TOKEN`, from the process
+    environment.
+- `server.pull_requests.local_path`:
+  - REQUIRED when provider is `local`.
+  - Path to a deterministic local JSON array of PR rows using the recommended row fields plus
+    optional `issue_identifier`, `title`, `body`, and `updated_at`.
+  - Relative paths resolve from the workflow file directory.
+- `server.pull_requests.cache_ttl_ms`:
+  - OPTIONAL positive integer.
+  - Default: `60000 ms`.
+
+Provider behavior:
+
+- GitHub lookup uses the configured repository and GitHub API search/detail responses.
+- Local lookup reads the configured JSON file and caches it for `cache_ttl_ms`.
+- Provider lookups run outside the orchestrator state lock.
+- Successful lookup results and misses are cached for `cache_ttl_ms`; provider errors are not cached.
+- Lookup errors omit `pull_request` and emit an observability warning when a logger is configured.
+
+Recommended row field:
+
+```json
+{
+  "pull_request": {
+    "provider": "github",
+    "number": 961,
+    "url": "https://github.com/org/repo/pull/961",
+    "state": "mergeable",
+    "is_draft": false,
+    "merged_at": null,
+    "head_branch": "MT-649",
+    "match": "branch_name"
+  }
+}
+```
+
+Recommended matching order:
+
+1. Match the tracker-provided `issue.branch_name` when present.
+2. Otherwise match PR head branches by normalized issue identifier, for example `ABC-123`.
+3. Otherwise, when the provider supports PR search, search PR title/body metadata for the exact
+   normalized issue identifier token, for example `ABC-123`.
+4. For completed rows, include merged PRs using the same matching rules.
+
+Identifier search MUST be scoped to the configured repository or repositories. It SHOULD use exact
+token matching and SHOULD NOT treat arbitrary substring matches as authoritative when the provider
+offers a more precise search mode. Implementations SHOULD record the match source, such as
+`branch_name`, `head_branch_identifier`, or `identifier_search`.
+
+Recommended state mapping:
+
+- `merged`: PR is merged.
+- `draft`: PR is open and draft.
+- `blocked`: PR is open and not currently mergeable because of mergeability, checks, reviews, or
+  another provider-specific blocking condition.
+- `mergeable`: PR is open, non-draft, and currently mergeable according to the provider.
+- `unknown`: provider data exists but cannot be mapped confidently.
+
+If multiple PRs match one issue, implementations SHOULD either choose the most recently updated PR
+and expose an ambiguity marker, or omit `pull_request` and surface an observability warning.
 
 Agent run logs:
 
@@ -2879,7 +3156,7 @@ Unless otherwise noted, Sections 17.1 through 17.10 are `Core Conformance`. Bull
 - Missing `WORKFLOW.md` returns typed error
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
-- Config defaults apply when OPTIONAL values are missing
+- Config defaults apply when OPTIONAL values are missing, including tracker-kind state defaults
 - `tracker.kind` validation enforces currently supported kinds (`linear`, `jira`, `beads`)
 - `tracker.api_key` works (including `$VAR` indirection)
 - `tracker.api_token`, `tracker.email`, `tracker.endpoint`, `tracker.project_key`,
@@ -3162,6 +3439,11 @@ Use the same validation profiles as Section 17:
 
 - HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
+- HTTP server extension exposes the dashboard snapshot fields from Section 13.3.1 if shipped,
+  including lifecycle phases, retry row titles, bounded completion history, effective max turns, and
+  capped recent agent messages.
+- OPTIONAL pull request metadata extension follows Section 13.7.3 when shipped and never affects
+  core orchestration behavior.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server or RPC session using configured Symphony auth.
 - `jira_rest` client-side tool extension exposes controlled Jira REST API access through the

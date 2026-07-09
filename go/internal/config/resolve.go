@@ -75,6 +75,14 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 		cfg.ServerPort = integer(m, "server.port", cfg.ServerPort)
 		cfg.ServerPortSet = true
 	}
+	cfg.PullRequests.Provider = str(m, "server.pull_requests.provider", cfg.PullRequests.Provider)
+	cfg.PullRequests.GitHubRepository = str(m, "server.pull_requests.github_repository", cfg.PullRequests.GitHubRepository)
+	cfg.PullRequests.GitHubToken = str(m, "server.pull_requests.github_token", cfg.PullRequests.GitHubToken)
+	cfg.PullRequests.LocalPath = str(m, "server.pull_requests.local_path", cfg.PullRequests.LocalPath)
+	cfg.PullRequests.CacheTTL = millis(m, "server.pull_requests.cache_ttl_ms", cfg.PullRequests.CacheTTL)
+	if cfg.PullRequests.Provider == "github" && cfg.PullRequests.GitHubToken == "" {
+		cfg.PullRequests.GitHubToken = firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN"))
+	}
 	if p := mapAny(m, "codex.policy"); p != nil {
 		cfg.Codex.Policy = cloneMap(p)
 	}
@@ -100,20 +108,37 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 	}
 	cfg.EnableBeadsCLI = cfg.TrackerKind == "beads"
 	cfg.EnableLinearGraphQL = cfg.TrackerKind == "linear"
+	cfg.EnableJiraREST = cfg.TrackerKind == "jira"
 	resolveEnvStrings(&cfg)
 	root, err := resolvePath(cfg.WorkspaceRoot, filepath.Dir(workflowPath))
 	if err != nil {
 		return cfg, err
 	}
 	cfg.WorkspaceRoot = root
+	if cfg.PullRequests.LocalPath != "" {
+		localPath, err := resolvePath(cfg.PullRequests.LocalPath, filepath.Dir(workflowPath))
+		if err != nil {
+			return cfg, err
+		}
+		cfg.PullRequests.LocalPath = localPath
+	}
 	return cfg, nil
 }
 
 func resolveEnvStrings(cfg *Effective) {
-	strings := []*string{&cfg.TrackerEndpoint, &cfg.TrackerAPIKey, &cfg.TrackerEmail, &cfg.TrackerProjectKey, &cfg.TrackerProjectSlug, &cfg.TrackerAssignee, &cfg.TrackerBDCommand, &cfg.TrackerJQL, &cfg.WorkspaceRoot, &cfg.Codex.Command, &cfg.Pi.Command, &cfg.Pi.Provider, &cfg.Pi.Model}
+	strings := []*string{&cfg.TrackerEndpoint, &cfg.TrackerAPIKey, &cfg.TrackerEmail, &cfg.TrackerProjectKey, &cfg.TrackerProjectSlug, &cfg.TrackerAssignee, &cfg.TrackerBDCommand, &cfg.TrackerJQL, &cfg.WorkspaceRoot, &cfg.Codex.Command, &cfg.Pi.Command, &cfg.Pi.Provider, &cfg.Pi.Model, &cfg.PullRequests.Provider, &cfg.PullRequests.GitHubRepository, &cfg.PullRequests.GitHubToken, &cfg.PullRequests.LocalPath}
 	for _, p := range strings {
 		*p = envRef.ReplaceAllStringFunc(*p, func(s string) string { return os.Getenv(s[1:]) })
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func resolvePath(path, base string) (string, error) {

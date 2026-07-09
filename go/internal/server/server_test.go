@@ -40,8 +40,14 @@ func TestState(t *testing.T) {
 	if _, ok := body["setup"]; !ok {
 		t.Fatal("state response missing setup")
 	}
-	if counts, ok := body["counts"].(map[string]any); !ok || counts["ready"] == nil || counts["setup"] == nil {
-		t.Fatalf("state response missing ready/setup count: %#v", body["counts"])
+	if _, ok := body["completed"]; !ok {
+		t.Fatal("state response missing completed")
+	}
+	if runtimeConfig, ok := body["runtime_config"].(map[string]any); !ok || runtimeConfig["agent_max_turns"] == nil || runtimeConfig["dashboard_refresh_ms"] == nil {
+		t.Fatalf("state response missing runtime_config: %#v", body["runtime_config"])
+	}
+	if counts, ok := body["counts"].(map[string]any); !ok || counts["ready"] == nil || counts["setup"] == nil || counts["post_run_hooks"] == nil || counts["completed"] == nil {
+		t.Fatalf("state response missing dashboard counts: %#v", body["counts"])
 	}
 	if totals, ok := body["agent_totals"].(map[string]any); !ok || totals["total_tokens"] == nil {
 		t.Fatalf("state response missing snake_case agent_totals: %#v", body["agent_totals"])
@@ -114,6 +120,43 @@ func TestIssueDetail(t *testing.T) {
 	}
 }
 
+func TestIssueEventsEndpoint(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.ActiveStates = []string{"Todo"}
+	cfg.WorkspaceRoot = t.TempDir()
+	issue := domain.Issue{ID: "1", Identifier: "A-1", Title: "T", State: "Todo"}
+	tr := &trackerfake.Tracker{Issues: []domain.Issue{issue}}
+	runner := &blockingRunner{started: make(chan struct{}), release: make(chan struct{})}
+	o := orchestrator.New(cfg, tr, runner, workspace.NewManager(cfg.WorkspaceRoot))
+	if err := o.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	defer close(runner.release)
+	time.Sleep(20 * time.Millisecond)
+
+	rr := httptest.NewRecorder()
+	New(o).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/A-1/events?limit=1", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["issue_identifier"] != "A-1" || body["limit"].(float64) != 1 {
+		t.Fatalf("unexpected events response: %#v", body)
+	}
+	events, ok := body["recent_events"].([]any)
+	if !ok || len(events) != 1 {
+		t.Fatalf("missing recent_events: %#v", body["recent_events"])
+	}
+}
+
 func TestIssueNotFoundEnvelope(t *testing.T) {
 	cfg := config.Defaults()
 	o := orchestrator.New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
@@ -154,10 +197,29 @@ func TestDashboardUsesStateAPI(t *testing.T) {
 		t.Fatal(rr.Code)
 	}
 	body := rr.Body.String()
-	for _, want := range []string{"Queued work", "Active sessions", "Total tokens", "/api/v1/state", "symphony-mark.svg", "Retry queue", "Agent run"} {
+	for _, want := range []string{"Queued work", "Active sessions", "Total tokens", "/api/v1/state", "symphony-mark.svg", "Retry queue", "Agent run", "Done today", "post_run_hooks", "pull_request", "detailRows", "workspace", "setup log"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard missing %q: %s", want, body)
 		}
+	}
+}
+
+func TestDashboardCollapsedCardsPreferRecentAgentMessages(t *testing.T) {
+	cfg := config.Defaults()
+	o := orchestrator.New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
+	rr := httptest.NewRecorder()
+	New(o).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{"function sessionSummary(sess)", "latestAgentText(sess)", "looksStructuredPayload(msg)", "msg=sessionSummary(sess);"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard collapsed-card summary missing %q", want)
+		}
+	}
+	if strings.Contains(body, "msg=sess.last_message||sess.last_event||'';") {
+		t.Fatal("dashboard collapsed running card reads raw last_message directly")
 	}
 }
 

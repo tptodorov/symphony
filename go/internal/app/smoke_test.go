@@ -16,6 +16,8 @@ func TestSmokeBeadsPiWorkflow(t *testing.T) {
 	content := `---
 tracker:
   kind: beads
+  active_states: [ready]
+  terminal_states: [done]
 agent_kind: pi
 agent:
   max_turns: 2
@@ -42,6 +44,8 @@ tracker:
   kind: linear
   api_key: test-key
   project_slug: TEST
+  active_states: [ready]
+  terminal_states: [done]
 agent_kind: codex
 agent:
   max_turns: 2

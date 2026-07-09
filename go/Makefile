@@ -1,5 +1,8 @@
 .PHONY: test vet build all
 
+GOCACHE ?= $(CURDIR)/.gocache
+export GOCACHE
+
 test:
 	go test ./...
 

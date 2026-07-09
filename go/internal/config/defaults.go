@@ -22,6 +22,7 @@ func Defaults() Effective {
 		WorkspaceRoot:       filepath.Join(os.TempDir(), "symphony_workspaces"),
 		Hooks:               domain.HooksConfig{Timeout: time.Minute},
 		Agent:               domain.AgentConfig{MaxConcurrentAgents: 10, MaxTurns: 20, MaxRetryBackoff: 5 * time.Minute},
+		PullRequests:        domain.PullRequestMetadataConfig{CacheTTL: time.Minute},
 		Codex:               domain.CodexConfig{Command: "codex app-server", TurnTimeout: time.Hour, ReadTimeout: 5 * time.Second, StallTimeout: 5 * time.Minute, Policy: map[string]any{}},
 		Pi:                  domain.PiConfig{Command: "pi --mode rpc --no-session", SessionSync: "none", ReadTimeout: 5 * time.Second, TurnTimeout: time.Hour, StallTimeout: 5 * time.Minute},
 		PerStateConcurrency: map[string]int{},

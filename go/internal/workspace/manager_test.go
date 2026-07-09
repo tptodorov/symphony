@@ -128,6 +128,26 @@ func TestPreparationCleanupAndIdentifierListing(t *testing.T) {
 	}
 }
 
+func TestRemoveForIssueReportsBeforeRemoveHookFailureAndStillRemovesWorkspace(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ws, created, err := m.CreateForIssue("ABC-1")
+	if err != nil || !created {
+		t.Fatalf("create workspace: %+v %v %v", ws, created, err)
+	}
+
+	err = m.RemoveForIssue(context.Background(), "ABC-1", "echo cleanup failed; exit 2", time.Second)
+	if err == nil {
+		t.Fatal("expected before_remove hook error")
+	}
+	var hookErr *BeforeRemoveHookError
+	if !errors.As(err, &hookErr) || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("expected typed hook error, got %T %v", err, err)
+	}
+	if _, err := os.Stat(ws.Path); !os.IsNotExist(err) {
+		t.Fatalf("workspace should still be removed, stat err=%v", err)
+	}
+}
+
 func TestHook(t *testing.T) {
 	ctx := context.Background()
 	if err := RunHook(ctx, "true", t.TempDir(), time.Second); err != nil {

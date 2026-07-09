@@ -228,6 +228,7 @@ func TestRunnerAdvertisesConfiguredDynamicTools(t *testing.T) {
 		TurnTimeout:         time.Second,
 		EnableBeadsCLI:      true,
 		EnableLinearGraphQL: true,
+		EnableJiraREST:      true,
 	}, make(chan agent.Event, 32))
 	if res.Err != nil {
 		t.Fatal(res.Err)
@@ -239,6 +240,9 @@ func TestRunnerAdvertisesConfiguredDynamicTools(t *testing.T) {
 	}
 	if got := valueAt(threadStart, "params", "dynamicTools", 1, "name"); got != "linear_graphql" {
 		t.Fatalf("second dynamic tool = %#v", got)
+	}
+	if got := valueAt(threadStart, "params", "dynamicTools", 2, "name"); got != "jira_rest" {
+		t.Fatalf("third dynamic tool = %#v", got)
 	}
 }
 

@@ -38,6 +38,16 @@ func (e *PrepareHookError) Error() string {
 
 func (e *PrepareHookError) Unwrap() error { return e.Err }
 
+type BeforeRemoveHookError struct {
+	Err error
+}
+
+func (e *BeforeRemoveHookError) Error() string {
+	return "before_remove failed: " + e.Err.Error()
+}
+
+func (e *BeforeRemoveHookError) Unwrap() error { return e.Err }
+
 func (m Manager) ListIssueIdentifiers() ([]string, error) {
 	root, err := filepath.Abs(m.Root)
 	if err != nil {
@@ -204,10 +214,17 @@ func (m Manager) RemoveForIssue(ctx context.Context, identifier, beforeRemove st
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
 	}
+	var hookErr error
 	if beforeRemove != "" {
-		_ = RunHook(ctx, beforeRemove, path, timeout)
+		if err := RunHook(ctx, beforeRemove, path, timeout); err != nil {
+			hookErr = &BeforeRemoveHookError{Err: err}
+		}
 	}
-	return os.RemoveAll(path)
+	removeErr := os.RemoveAll(path)
+	if removeErr != nil {
+		return errors.Join(hookErr, removeErr)
+	}
+	return hookErr
 }
 
 func (m Manager) createStagingDir(root, key string) (string, error) {

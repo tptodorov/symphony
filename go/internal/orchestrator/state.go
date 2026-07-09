@@ -12,12 +12,14 @@ type running struct {
 	sessionID, workspace     string
 	threadID, turnID         string
 	started, lastEvent       time.Time
-	status, lastEventType    string
+	phase, status            string
+	lastEventType            string
 	lastMessage              string
 	error                    *string
 	logs                     domain.RunLogPaths
 	agentTextTail            []AgentTextMessage
 	turnCount                int
+	maxTurns                 int
 	agentInputTokens         int
 	agentOutputTokens        int
 	agentTotalTokens         int
@@ -34,7 +36,14 @@ type retryItem struct {
 }
 
 type cancellationReason struct {
-	status domain.RunAttemptStatus
-	err    string
-	retry  bool
+	status     domain.RunAttemptStatus
+	err        string
+	retry      bool
+	completed  bool
+	finalIssue domain.Issue
+}
+
+type retainedPhase struct {
+	snapshot  RunningSnapshot
+	expiresAt time.Time
 }
