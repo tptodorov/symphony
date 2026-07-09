@@ -293,6 +293,23 @@ func (c *appServerClient) dynamicTools() []map[string]any {
 			"deferLoading": false,
 		})
 	}
+	if c.req.EnableJiraREST {
+		out = append(out, map[string]any{
+			"name":        "jira_rest",
+			"description": "Execute one Jira REST API request using Symphony's configured Jira endpoint and auth.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"method": map[string]any{"type": "string"},
+					"path":   map[string]any{"type": "string"},
+					"query":  map[string]any{"type": "object", "additionalProperties": true},
+					"body":   map[string]any{},
+				},
+				"required": []string{"method", "path"},
+			},
+			"deferLoading": false,
+		})
+	}
 	return out
 }
 
@@ -441,6 +458,13 @@ func (c *appServerClient) handleDynamicToolCall(params json.RawMessage) map[stri
 		}
 		result := tools.ExecuteLinearGraphQL(c.ctx, c.req.TrackerEndpoint, c.req.TrackerAPIKey, query, variables)
 		return dynamicToolResult(result)
+	case "jira_rest":
+		method, path, query, body, err := parseJiraRESTArgs(root["arguments"])
+		if err != nil {
+			return dynamicToolFailure(err.Error())
+		}
+		result := tools.ExecuteJiraREST(c.ctx, c.req.TrackerEndpoint, c.req.TrackerEmail, c.req.TrackerAPIKey, method, path, query, body)
+		return dynamicToolResult(result)
 	default:
 		return dynamicToolFailure("unsupported_tool_call: " + firstNonEmpty(toolName, "unknown"))
 	}
@@ -480,6 +504,30 @@ func parseLinearGraphQLArgs(v any) (string, map[string]any, error) {
 		variables = parsed
 	}
 	return query, variables, nil
+}
+
+func parseJiraRESTArgs(v any) (string, string, map[string]any, any, error) {
+	root, ok := v.(map[string]any)
+	if !ok || root == nil {
+		return "", "", nil, nil, fmt.Errorf("arguments must be an object")
+	}
+	method, _ := root["method"].(string)
+	path, _ := root["path"].(string)
+	if strings.TrimSpace(method) == "" {
+		return "", "", nil, nil, fmt.Errorf("method must be non-empty")
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", "", nil, nil, fmt.Errorf("path must be non-empty")
+	}
+	query := map[string]any{}
+	if raw, ok := root["query"]; ok {
+		parsed, ok := raw.(map[string]any)
+		if !ok {
+			return "", "", nil, nil, fmt.Errorf("query must be an object")
+		}
+		query = parsed
+	}
+	return method, path, query, root["body"], nil
 }
 
 func (c *appServerClient) shouldAutoApproveMCPToolCall(params json.RawMessage) bool {

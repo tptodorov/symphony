@@ -3,6 +3,7 @@ package jira
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,8 @@ import (
 	"github.com/tptodorov/symphony/go/internal/config"
 )
 
+const testEndpoint = "https://jira.example"
+
 type capturedRequest struct {
 	JQL           string   `json:"jql"`
 	MaxResults    int      `json:"maxResults"`
@@ -18,18 +21,36 @@ type capturedRequest struct {
 	NextPageToken string   `json:"nextPageToken"`
 }
 
+func testHTTPClient(handler http.HandlerFunc) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, r)
+		return rr.Result(), nil
+	})}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := f(r)
+	if resp != nil && resp.Body == nil {
+		resp.Body = io.NopCloser(strings.NewReader(""))
+	}
+	return resp, err
+}
+
 func TestClientFetchCandidatesDefaultJQLAndNormalization(t *testing.T) {
 	var seen capturedRequest
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := testHTTPClient(func(w http.ResponseWriter, r *http.Request) {
 		requireJiraRequest(t, r)
 		if err := json.NewDecoder(r.Body).Decode(&seen); err != nil {
 			t.Fatal(err)
 		}
 		_, _ = w.Write([]byte(`{"isLast":true,"issues":[{"id":"10001","key":"MOD-1","fields":{"summary":"Fix cache","description":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Body"}]}]},"priority":{"id":"2","name":"High"},"status":{"name":"To Do"},"assignee":{"emailAddress":"owner@example.com"},"labels":["Go","Backend"],"created":"2026-06-22T09:10:11.000+0000","updated":"2026-06-22T10:10:11.000+0000","issuelinks":[{"type":{"name":"Blocks"},"inwardIssue":{"id":"10000","key":"MOD-0","fields":{"status":{"name":"In Progress"}}}},{"type":{"name":"Blocks"},"outwardIssue":{"id":"10002","key":"MOD-2","fields":{"status":{"name":"To Do"}}}},{"type":{"name":"Relates"},"inwardIssue":{"id":"10003","key":"MOD-3","fields":{"status":{"name":"To Do"}}}}]}}]}`))
-	}))
-	defer ts.Close()
+	})
 
-	c := New(ts.URL, "user@example.com", "token", "MOD", "", 50)
+	c := New(testEndpoint, "user@example.com", "token", "MOD", "", 50)
+	c.HTTP = client
 	issues, err := c.FetchCandidates(context.Background(), config.Effective{ActiveStates: []string{"To Do"}, RequiredLabels: []string{"go"}, TrackerPageSize: 25})
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +80,7 @@ func TestClientFetchCandidatesDefaultJQLAndNormalization(t *testing.T) {
 	if issue.Assignee == nil || *issue.Assignee != "owner@example.com" {
 		t.Fatalf("bad assignee %+v", issue.Assignee)
 	}
-	if issue.URL == nil || *issue.URL != ts.URL+"/browse/MOD-1" {
+	if issue.URL == nil || *issue.URL != testEndpoint+"/browse/MOD-1" {
 		t.Fatalf("bad url %+v", issue.URL)
 	}
 	if strings.Join(issue.Labels, ",") != "backend,go" {
@@ -78,16 +99,16 @@ func TestClientFetchCandidatesDefaultJQLAndNormalization(t *testing.T) {
 
 func TestClientFetchCandidatesUsesProjectSlugAlias(t *testing.T) {
 	var seen capturedRequest
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := testHTTPClient(func(w http.ResponseWriter, r *http.Request) {
 		requireJiraRequest(t, r)
 		if err := json.NewDecoder(r.Body).Decode(&seen); err != nil {
 			t.Fatal(err)
 		}
 		_, _ = w.Write([]byte(`{"isLast":true,"issues":[]}`))
-	}))
-	defer ts.Close()
+	})
 
-	c := New(ts.URL, "user@example.com", "token", "", "", 50)
+	c := New(testEndpoint, "user@example.com", "token", "", "", 50)
+	c.HTTP = client
 	_, err := c.FetchCandidates(context.Background(), config.Effective{TrackerProjectSlug: "MOD", ActiveStates: []string{"To Do"}})
 	if err != nil {
 		t.Fatal(err)
@@ -99,16 +120,16 @@ func TestClientFetchCandidatesUsesProjectSlugAlias(t *testing.T) {
 
 func TestClientFetchCandidatesUsesCustomJQL(t *testing.T) {
 	var seen capturedRequest
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := testHTTPClient(func(w http.ResponseWriter, r *http.Request) {
 		requireJiraRequest(t, r)
 		if err := json.NewDecoder(r.Body).Decode(&seen); err != nil {
 			t.Fatal(err)
 		}
 		_, _ = w.Write([]byte(`{"isLast":true,"issues":[]}`))
-	}))
-	defer ts.Close()
+	})
 
-	c := New(ts.URL, "user@example.com", "token", "MOD", "", 50)
+	c := New(testEndpoint, "user@example.com", "token", "MOD", "", 50)
+	c.HTTP = client
 	_, err := c.FetchCandidates(context.Background(), config.Effective{TrackerJQL: `assignee = currentUser() ORDER BY created ASC`, ActiveStates: []string{"To Do"}})
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +141,7 @@ func TestClientFetchCandidatesUsesCustomJQL(t *testing.T) {
 
 func TestClientPagination(t *testing.T) {
 	requests := []capturedRequest{}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := testHTTPClient(func(w http.ResponseWriter, r *http.Request) {
 		requireJiraRequest(t, r)
 		var req capturedRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -132,10 +153,10 @@ func TestClientPagination(t *testing.T) {
 			return
 		}
 		_, _ = w.Write([]byte(`{"isLast":true,"issues":[{"id":"10002","key":"MOD-2","fields":{"summary":"Second","status":{"name":"To Do"}}}]}`))
-	}))
-	defer ts.Close()
+	})
 
-	c := New(ts.URL, "user@example.com", "token", "MOD", "", 2)
+	c := New(testEndpoint, "user@example.com", "token", "MOD", "", 2)
+	c.HTTP = client
 	issues, err := c.FetchCandidates(context.Background(), config.Effective{ActiveStates: []string{"To Do"}})
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +171,7 @@ func TestClientPagination(t *testing.T) {
 
 func TestClientFetchStatesByIDAndIdentifier(t *testing.T) {
 	requests := []capturedRequest{}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := testHTTPClient(func(w http.ResponseWriter, r *http.Request) {
 		requireJiraRequest(t, r)
 		var req capturedRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -158,10 +179,10 @@ func TestClientFetchStatesByIDAndIdentifier(t *testing.T) {
 		}
 		requests = append(requests, req)
 		_, _ = w.Write([]byte(`{"isLast":true,"issues":[{"id":"10001","key":"MOD-1","fields":{"summary":"Issue","status":{"name":"Done"}}}]}`))
-	}))
-	defer ts.Close()
+	})
 
-	c := New(ts.URL, "user@example.com", "token", "MOD", "", 50)
+	c := New(testEndpoint, "user@example.com", "token", "MOD", "", 50)
+	c.HTTP = client
 	byID, err := c.FetchStatesByID(context.Background(), []string{"10001"})
 	if err != nil {
 		t.Fatal(err)
@@ -180,12 +201,12 @@ func TestClientFetchStatesByIDAndIdentifier(t *testing.T) {
 
 func TestClientErrors(t *testing.T) {
 	t.Run("non-2xx", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		client := testHTTPClient(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad auth", http.StatusUnauthorized)
-		}))
-		defer ts.Close()
+		})
 
-		c := New(ts.URL, "user@example.com", "token", "MOD", "", 50)
+		c := New(testEndpoint, "user@example.com", "token", "MOD", "", 50)
+		c.HTTP = client
 		_, err := c.FetchCandidates(context.Background(), config.Effective{ActiveStates: []string{"To Do"}})
 		if err == nil || !strings.Contains(err.Error(), "jira_api_status") {
 			t.Fatalf("expected jira_api_status, got %v", err)
@@ -193,12 +214,12 @@ func TestClientErrors(t *testing.T) {
 	})
 
 	t.Run("missing issues", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		client := testHTTPClient(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"isLast":true}`))
-		}))
-		defer ts.Close()
+		})
 
-		c := New(ts.URL, "user@example.com", "token", "MOD", "", 50)
+		c := New(testEndpoint, "user@example.com", "token", "MOD", "", 50)
+		c.HTTP = client
 		_, err := c.FetchCandidates(context.Background(), config.Effective{ActiveStates: []string{"To Do"}})
 		if err == nil || !strings.Contains(err.Error(), "jira_unknown_payload") {
 			t.Fatalf("expected jira_unknown_payload, got %v", err)
@@ -206,12 +227,12 @@ func TestClientErrors(t *testing.T) {
 	})
 
 	t.Run("missing next page token", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		client := testHTTPClient(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"isLast":false,"issues":[]}`))
-		}))
-		defer ts.Close()
+		})
 
-		c := New(ts.URL, "user@example.com", "token", "MOD", "", 50)
+		c := New(testEndpoint, "user@example.com", "token", "MOD", "", 50)
+		c.HTTP = client
 		_, err := c.FetchCandidates(context.Background(), config.Effective{ActiveStates: []string{"To Do"}})
 		if err == nil || !strings.Contains(err.Error(), "jira_missing_next_page_token") {
 			t.Fatalf("expected jira_missing_next_page_token, got %v", err)

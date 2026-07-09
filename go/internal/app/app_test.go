@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,7 +20,7 @@ import (
 func TestNew(t *testing.T) {
 	dir := t.TempDir()
 	wf := filepath.Join(dir, "WORKFLOW.md")
-	if err := os.WriteFile(wf, []byte("---\ntracker:\n  kind: linear\n  api_key: k\n  project_slug: p\nworkspace:\n  root: work\n---\nPrompt"), 0o600); err != nil {
+	if err := os.WriteFile(wf, []byte("---\ntracker:\n  kind: linear\n  api_key: k\n  project_slug: p\n  active_states: [ready]\n  terminal_states: [done]\nworkspace:\n  root: work\n---\nPrompt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	app, err := New(context.Background(), Options{WorkflowPath: wf, Tracker: &trackerfake.Tracker{}, Runner: &agentfake.Runner{}})
@@ -42,7 +44,7 @@ func TestNewCleansOldPreparationWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	wf := filepath.Join(dir, "WORKFLOW.md")
-	body := "---\ntracker:\n  kind: linear\n  api_key: k\n  project_slug: p\nworkspace:\n  root: " + root + "\n---\nPrompt"
+	body := "---\ntracker:\n  kind: linear\n  api_key: k\n  project_slug: p\n  active_states: [ready]\n  terminal_states: [done]\nworkspace:\n  root: " + root + "\n---\nPrompt"
 	if err := os.WriteFile(wf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -62,10 +64,24 @@ func TestRunStartsEphemeralStatusServer(t *testing.T) {
 	cfg.WorkspaceRoot = t.TempDir()
 	o := orchestrator.New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(cfg.WorkspaceRoot))
 	a := &App{Opt: Options{Port: 0, PortSet: true}, Orch: o, cfg: cfg}
+	oldListenTCP := listenTCP
+	listenCalled := false
+	listener := newBlockingListener()
+	listenTCP = func(network, address string) (net.Listener, error) {
+		listenCalled = true
+		if network != "tcp" || address != "127.0.0.1:0" {
+			t.Fatalf("unexpected listen target %s %s", network, address)
+		}
+		return listener, nil
+	}
+	defer func() { listenTCP = oldListenTCP }()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- a.Run(ctx) }()
 	time.Sleep(20 * time.Millisecond)
+	if !listenCalled {
+		t.Fatal("status server did not start listener")
+	}
 	cancel()
 	select {
 	case err := <-done:
@@ -76,6 +92,34 @@ func TestRunStartsEphemeralStatusServer(t *testing.T) {
 		t.Fatal("run did not stop")
 	}
 }
+
+type blockingListener struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newBlockingListener() *blockingListener {
+	return &blockingListener{closed: make(chan struct{})}
+}
+
+func (l *blockingListener) Accept() (net.Conn, error) {
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *blockingListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *blockingListener) Addr() net.Addr {
+	return testAddr("127.0.0.1:0")
+}
+
+type testAddr string
+
+func (a testAddr) Network() string { return "tcp" }
+func (a testAddr) String() string  { return string(a) }
 
 func TestRunRejectsNegativePort(t *testing.T) {
 	cfg := config.Defaults()

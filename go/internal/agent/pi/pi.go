@@ -173,6 +173,12 @@ func handleToolRequest(w io.Writer, logs *agent.RunLogs, msg map[string]any, req
 		query, _ := msg["query"].(string)
 		vars, _ := msg["variables"].(map[string]any)
 		result = tools.ExecuteLinearGraphQL(context.Background(), req.TrackerEndpoint, req.TrackerAPIKey, query, vars)
+	case "jira_rest":
+		method, _ := msg["method"].(string)
+		path, _ := msg["path"].(string)
+		query, _ := msg["query"].(map[string]any)
+		body := msg["body"]
+		result = tools.ExecuteJiraREST(context.Background(), req.TrackerEndpoint, req.TrackerEmail, req.TrackerAPIKey, method, path, query, body)
 	default:
 		result = tools.ToolResult{Success: false, Error: "unknown tool: " + method}
 	}

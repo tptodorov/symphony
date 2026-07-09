@@ -20,9 +20,11 @@ type RunRequest struct {
 	Policy              any
 	EnableBeadsCLI      bool
 	EnableLinearGraphQL bool
+	EnableJiraREST      bool
 	TrackerBDCommand    string
 	TrackerWorkDir      string
 	TrackerEndpoint     string
+	TrackerEmail        string
 	TrackerAPIKey       string
 	Logs                domain.RunLogPaths
 }

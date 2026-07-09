@@ -29,8 +29,10 @@ type EffectiveConfig struct {
 	PerStateConcurrency map[string]int
 	ServerPort          int
 	ServerPortSet       bool
+	PullRequests        PullRequestMetadataConfig
 	EnableBeadsCLI      bool
 	EnableLinearGraphQL bool
+	EnableJiraREST      bool
 }
 
 type HooksConfig struct {
@@ -45,6 +47,14 @@ type AgentConfig struct {
 	MaxConcurrentAgents int
 	MaxTurns            int
 	MaxRetryBackoff     time.Duration
+}
+
+type PullRequestMetadataConfig struct {
+	Provider         string
+	GitHubRepository string
+	GitHubToken      string
+	LocalPath        string
+	CacheTTL         time.Duration
 }
 
 type CodexConfig struct {

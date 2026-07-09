@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,8 +65,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/api/v1/")
+		eventsRoute := false
+		if strings.HasSuffix(id, "/events") {
+			eventsRoute = true
+			id = strings.TrimSuffix(id, "/events")
+		}
 		if decoded, err := url.PathUnescape(id); err == nil {
 			id = decoded
+		}
+		if eventsRoute {
+			limit := 100
+			if raw := r.URL.Query().Get("limit"); raw != "" {
+				if parsed, err := strconv.Atoi(raw); err == nil {
+					limit = parsed
+				}
+			}
+			if events, ok := s.orch.IssueEvents(id, limit); ok {
+				json.NewEncoder(w).Encode(events)
+				return
+			}
+			writeError(w, http.StatusNotFound, "issue_not_found", "issue is not known to the current in-memory state")
+			return
 		}
 		if issue, ok := s.orch.IssueSnapshot(id); ok {
 			json.NewEncoder(w).Encode(issue)
@@ -189,9 +209,18 @@ button{cursor:pointer;font-family:var(--font-sans);}
 .iss-key{font-family:var(--font-mono);font-size:12px;}
 .card-right{margin-left:auto;display:flex;align-items:center;gap:8px;}
 .no-pr{font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);}
+.pr-chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);border-radius:999px;padding:2px 7px;font-family:var(--font-mono);font-size:11px;color:var(--fg-muted);background:var(--bg);}
+.pr-dot{width:7px;height:7px;border-radius:999px;background:var(--fg-subtle);flex:none;}
+.pr-open .pr-dot{background:var(--blue);}
+.pr-merged .pr-dot{background:var(--lime);}
+.pr-closed .pr-dot{background:var(--hyper);}
 .card-title{font-size:14.5px;font-weight:500;line-height:1.3;}
 .card-meta{font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);}
 .card-msg{font-size:12.5px;color:var(--fg-muted);line-height:1.4;border-top:1px solid var(--page-bg);padding-top:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.detail-box{border-top:1px solid var(--page-bg);padding-top:9px;display:flex;flex-direction:column;gap:5px;}
+.detail-row{display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px;align-items:baseline;font-family:var(--font-mono);font-size:10.5px;color:var(--fg-subtle);}
+.detail-key{color:var(--fg-muted);}
+.detail-val{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 
 /* Lifecycle track */
 .lc{display:flex;align-items:center;}
@@ -343,6 +372,10 @@ function fmtRelTime(iso){
   if(!iso) return '—';
   return fmtSecs((Date.now()-new Date(iso).getTime())/1000);
 }
+function fmtUntil(iso){
+  if(!iso) return '—';
+  return fmtSecs((new Date(iso).getTime()-Date.now())/1000);
+}
 function fmtTime(iso){
   if(!iso) return '';
   return new Date(iso).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
@@ -353,29 +386,57 @@ function prioColor(p){
   if(p<=2) return 'var(--lime)';
   return 'var(--fg-subtle)';
 }
+function maxTurnsFor(row){
+  if(row&&row.max_turns) return row.max_turns;
+  if(lastState&&lastState.runtime_config&&lastState.runtime_config.agent_max_turns) return lastState.runtime_config.agent_max_turns;
+  return 0;
+}
+function runtimeFor(row){
+  if(row&&row.runtime_seconds) return fmtSecs(row.runtime_seconds);
+  if(row&&row.started_at) return fmtRelTime(row.started_at);
+  return '—';
+}
+function prHtml(pr,emptyText){
+  if(!pr) return '<span class="no-pr">'+x(emptyText||'no PR yet')+'</span>';
+  var label=pr.number?'#'+pr.number:(pr.head_branch||'PR');
+  var state=(pr.state||'').toLowerCase();
+  if(pr.merged_at) state='merged';
+  var cls='pr-chip';
+  if(state==='open') cls+=' pr-open';
+  else if(state==='merged') cls+=' pr-merged';
+  else if(state==='closed') cls+=' pr-closed';
+  var text=label+(state?' '+state:'');
+  var chip='<span class="'+cls+'"><span class="pr-dot"></span>'+x(text)+'</span>';
+  if(pr.url) return '<a class="lnk" href="'+x(pr.url)+'" target="_blank" onclick="event.stopPropagation()">'+chip+'</a>';
+  return chip;
+}
 
 function lcNodes(sess){
-  // 5 nodes: 0=prepare 1=after_create 2=before_run 3=run-pill 4=done
+  // 7 nodes: 0=prepare 1=after_create 2=before_run 3=run 4=after_run 5=before_remove 6=done
   var nodes=[
     {isPill:false,lbl:'',state:'fut'},
     {isPill:false,lbl:'',state:'fut'},
     {isPill:false,lbl:'',state:'fut'},
     {isPill:true, lbl:'run',state:'fut'},
+    {isPill:false,lbl:'',state:'fut'},
+    {isPill:false,lbl:'',state:'fut'},
     {isPill:false,lbl:'',state:'fut'}
   ];
   var pos=0;
-  if(sess._t==='running'){
-    pos=3;
-    nodes[3].lbl='T'+(sess.turn_count||0);
-  } else {
-    var st=sess.stage||'';
-    var hk=sess.hook||'';
-    if(st==='prepare'||st==='preparing_workspace') pos=0;
-    else if(hk==='after_create') pos=1;
-    else if(hk==='before_run') pos=2;
-    else pos=0;
-  }
-  for(var i=0;i<5;i++){
+  var ph=sess.phase||'';
+  var st=sess.stage||'';
+  var hk=sess.hook||'';
+  if(sess._t==='running'&&!ph) ph='agent_run';
+  if(ph==='prepare'||st==='prepare'||st==='preparing_workspace'||st==='building_prompt') pos=0;
+  else if(ph==='after_create'||hk==='after_create') pos=1;
+  else if(ph==='before_run'||hk==='before_run') pos=2;
+  else if(ph==='agent_run') pos=3;
+  else if(ph==='after_run') pos=4;
+  else if(ph==='before_remove') pos=5;
+  else if(ph==='completed') pos=6;
+  else if(sess._t==='running') pos=3;
+  nodes[3].lbl='T'+(sess.turn_count||0);
+  for(var i=0;i<nodes.length;i++){
     if(i<pos) nodes[i].state='done';
     else if(i===pos) nodes[i].state='cur';
     else nodes[i].state='fut';
@@ -404,6 +465,55 @@ function renderTrack(nodes){
   return h+'</div>';
 }
 
+function detailRows(sess){
+  var rows=[];
+  function add(k,v){
+    if(v) rows.push('<div class="detail-row"><span class="detail-key">'+x(k)+'</span><span class="detail-val" title="'+x(v)+'">'+x(v)+'</span></div>');
+  }
+  add('workspace',sess.workspace);
+  add('log',sess.log_path);
+  if(sess.logs&&sess.logs.codex_session_logs){
+    sess.logs.codex_session_logs.forEach(function(l){add(l.label||'log',l.path);});
+  }
+  if(sess.setup){
+    var s=sess.setup;
+    add('setup',(s.status||'')+(s.stage?' '+s.stage:'')+(s.hook?' '+s.hook:''));
+    add('setup err',s.error);
+    add('setup log',s.log_path);
+    add('failed ws',s.failed_workspace);
+  }
+  if(sess.error) add('error',sess.error);
+  if(!rows.length) return '';
+  return '<div class="detail-box">'+rows.join('')+'</div>';
+}
+
+function looksStructuredPayload(v){
+  var s=String(v||'').trim();
+  if(!s) return false;
+  var first=s.charAt(0),last=s.charAt(s.length-1);
+  if((first==='{'&&last==='}')||(first==='['&&last===']')){
+    try{JSON.parse(s);return true;}catch(e){}
+  }
+  return s.indexOf('"jsonrpc"')!==-1||(s.indexOf('"method"')!==-1&&s.indexOf('"params"')!==-1);
+}
+
+function latestAgentText(sess){
+  var msgs=sess.recent_agent_messages||[];
+  for(var i=msgs.length-1;i>=0;i--){
+    var m=msgs[i];
+    if(m&&m.text) return m.text;
+  }
+  return '';
+}
+
+function sessionSummary(sess){
+  var text=latestAgentText(sess);
+  if(text) return text;
+  var msg=sess.last_message||'';
+  if(msg&&!looksStructuredPayload(msg)) return msg;
+  return sess.last_event||'';
+}
+
 function renderCard(sess,open){
   var id=sess.issue_id||sess.issue_identifier||'';
   var key=x(sess.issue_identifier||sess.issue_id);
@@ -413,9 +523,10 @@ function renderCard(sess,open){
 
   if(sess._t==='running'){
     var tk=sess.tokens?fmtTok(sess.tokens.total_tokens):'0';
-    var rt=sess.started_at?fmtRelTime(sess.started_at):'—';
-    meta='turn '+(sess.turn_count||0)+'/20 · '+tk+' tok · '+rt;
-    msg=sess.last_message||sess.last_event||'';
+    var max=maxTurnsFor(sess);
+    var turn='turn '+(sess.turn_count||0)+(max?'/'+max:'');
+    meta=turn+' · '+tk+' tok · '+runtimeFor(sess);
+    msg=sessionSummary(sess);
   } else {
     var stage=sess.stage||'';
     var hook=sess.hook||'';
@@ -438,7 +549,8 @@ function renderCard(sess,open){
     } else {
       rows='<div class="empty">No activity yet</div>';
     }
-    streamHtml='<div class="act-hdr" onclick="event.stopPropagation()">'
+    streamHtml=detailRows(sess)
+      +'<div class="act-hdr" onclick="event.stopPropagation()">'
       +'<div class="act-lbl">Agent activity · newest first · '+msgs.length+' events</div>'
       +'<div class="act-stream scroll">'+rows+'</div>'
       +'</div>';
@@ -448,7 +560,7 @@ function renderCard(sess,open){
   return '<div class="card" data-id="'+x(id)+'" onclick="toggle(this)">'
     +'<div class="card-hdr">'
     +(href?'<a class="lnk iss-key" href="'+href+'" target="_blank" onclick="event.stopPropagation()">'+key+'</a>':'<span class="iss-key">'+key+'</span>')
-    +'<div class="card-right" onclick="event.stopPropagation()"><span class="no-pr">no PR yet</span></div>'
+    +'<div class="card-right" onclick="event.stopPropagation()">'+prHtml(sess.pull_request,'no PR yet')+'</div>'
     +'</div>'
     +'<div class="card-title">'+title+'</div>'
     +renderTrack(nodes)
@@ -486,11 +598,13 @@ function renderQueued(state){
   var h='';
   rows.forEach(function(q){
     var key=x(q.issue_identifier),href=q.issue_url?x(q.issue_url):'',title=x(q.title||'');
+    var wait=q.wait_seconds!=null?fmtSecs(q.wait_seconds):(q.queued_since?fmtRelTime(q.queued_since):(q.created_at?fmtRelTime(q.created_at):'—'));
     h+='<div class="q-row">'
       +'<span class="prio" style="background:'+prioColor(q.priority)+'"></span>'
       +'<div class="q-body">'
       +'<div class="q-top">'
       +(href?'<a class="lnk" href="'+href+'" target="_blank" style="font-family:var(--font-mono);font-size:11px;">'+key+'</a>':'<span style="font-family:var(--font-mono);font-size:11px;">'+key+'</span>')
+      +'<span class="q-wait">'+x(wait)+'</span>'
       +'</div>'
       +'<div class="q-title">'+title+'</div>'
       +'</div></div>';
@@ -506,7 +620,7 @@ function renderRetry(state){
   rows.forEach(function(r){
     var key=x(r.issue_identifier),href=r.issue_url?x(r.issue_url):'';
     var title=x(r.title||'');
-    var next=r.due_at?new Date(r.due_at).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}):'—';
+    var next=r.due_at?fmtUntil(r.due_at):'—';
     var err=x(r.error||'');
     h+='<div class="r-row">'
       +'<div style="display:flex;justify-content:space-between;gap:8px;">'
@@ -515,16 +629,32 @@ function renderRetry(state){
       +'</div>'
       +'<div class="r-title">'+title+'</div>'
       +'<div class="r-meta">'+err+(err?' · ':'')+'retry '+next+'</div>'
+      +'<div style="margin-top:6px;">'+prHtml(r.pull_request,'no PR yet')+'</div>'
       +'</div>';
   });
   document.getElementById('rr-rows').innerHTML=h;
 }
 
 function renderDone(state){
-  var cnt=(state.counts&&state.counts.completed)||0;
-  document.getElementById('rd-cnt').textContent='· '+cnt;
-  // Completed session details are not in the snapshot; show count only
-  var h=cnt?'<div class="empty">'+cnt+' completed this run (details not in snapshot)</div>':'<div class="empty">None yet</div>';
+  var rows=state.completed||[];
+  document.getElementById('rd-cnt').textContent='· '+rows.length;
+  if(!rows.length){document.getElementById('rd-rows').innerHTML='<div class="empty">None yet</div>';return;}
+  var h='';
+  rows.slice().reverse().forEach(function(d){
+    var key=x(d.issue_identifier),href=d.issue_url?x(d.issue_url):'',title=x(d.title||'');
+    var max=maxTurnsFor(d);
+    var turn='turns '+(d.turn_count||0)+(max?'/'+max:'');
+    var tok=d.tokens?fmtTok(d.tokens.total_tokens)+' tok':'0 tok';
+    var meta=turn+' · '+tok+' · '+runtimeFor(d)+' · '+x(fmtTime(d.completed_at));
+    h+='<div class="d-row">'
+      +'<div class="d-top">'
+      +(href?'<a class="lnk d-key" href="'+href+'" target="_blank">'+key+'</a>':'<span class="d-key">'+key+'</span>')
+      +prHtml(d.pull_request,'no PR yet')
+      +'</div>'
+      +'<div class="d-title">'+title+'</div>'
+      +'<div class="d-meta">'+meta+'</div>'
+      +'</div>';
+  });
   document.getElementById('rd-rows').innerHTML=h;
 }
 
@@ -533,7 +663,7 @@ function renderKpi(state){
   document.getElementById('kv-q').textContent=val(c.ready,'0');
   document.getElementById('kv-p').textContent=val(c.setup,'0');
   document.getElementById('kv-r').textContent=val(c.running,'0');
-  document.getElementById('kv-ph').textContent='—';
+  document.getElementById('kv-ph').textContent=val(c.post_run_hooks,'0');
   document.getElementById('kv-rt').textContent=val(c.retrying,'0');
   document.getElementById('kv-d').textContent=val(c.completed,'0');
   document.getElementById('kv-t').textContent=fmtTok(t.total_tokens||0);

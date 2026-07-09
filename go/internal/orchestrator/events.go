@@ -7,61 +7,109 @@ import (
 )
 
 type Snapshot struct {
-	GeneratedAt time.Time            `json:"generated_at"`
-	Ready       []IssueQueueSnapshot `json:"ready"`
-	Setup       []SetupSnapshot      `json:"setup"`
-	Running     []RunningSnapshot    `json:"running"`
-	Retrying    []RetrySnapshot      `json:"retrying"`
-	RetryQueue  []RetrySnapshot      `json:"retry_queue,omitempty"`
-	Counts      map[string]int       `json:"counts"`
-	AgentTotals *domain.AgentTotals  `json:"agent_totals,omitempty"`
-	RateLimits  map[string]any       `json:"rate_limits,omitempty"`
+	GeneratedAt   time.Time              `json:"generated_at"`
+	RuntimeConfig *RuntimeConfigSnapshot `json:"runtime_config,omitempty"`
+	Ready         []IssueQueueSnapshot   `json:"ready"`
+	Setup         []SetupSnapshot        `json:"setup"`
+	Running       []RunningSnapshot      `json:"running"`
+	Retrying      []RetrySnapshot        `json:"retrying"`
+	RetryQueue    []RetrySnapshot        `json:"retry_queue,omitempty"`
+	Completed     []CompletedSnapshot    `json:"completed"`
+	Counts        map[string]int         `json:"counts"`
+	AgentTotals   *domain.AgentTotals    `json:"agent_totals,omitempty"`
+	RateLimits    map[string]any         `json:"rate_limits,omitempty"`
+}
+type RuntimeConfigSnapshot struct {
+	AgentMaxTurns      int `json:"agent_max_turns"`
+	DashboardRefreshMS int `json:"dashboard_refresh_ms,omitempty"`
 }
 type IssueQueueSnapshot struct {
-	IssueID         string  `json:"issue_id"`
-	IssueIdentifier string  `json:"issue_identifier"`
-	IssueURL        *string `json:"issue_url,omitempty"`
-	Title           string  `json:"title,omitempty"`
-	State           string  `json:"state,omitempty"`
-	Priority        *int    `json:"priority,omitempty"`
+	IssueID         string               `json:"issue_id"`
+	IssueIdentifier string               `json:"issue_identifier"`
+	IssueURL        *string              `json:"issue_url,omitempty"`
+	Title           string               `json:"title,omitempty"`
+	State           string               `json:"state,omitempty"`
+	Priority        *int                 `json:"priority,omitempty"`
+	CreatedAt       *time.Time           `json:"created_at,omitempty"`
+	QueuedSince     *time.Time           `json:"queued_since,omitempty"`
+	WaitSeconds     *int                 `json:"wait_seconds,omitempty"`
+	PullRequest     *PullRequestSnapshot `json:"pull_request,omitempty"`
+	sourceIssue     domain.Issue
 }
 type RunningSnapshot struct {
-	IssueID             string             `json:"issue_id,omitempty"`
-	IssueIdentifier     string             `json:"issue_identifier,omitempty"`
-	IssueURL            *string            `json:"issue_url,omitempty"`
-	Title               string             `json:"title,omitempty"`
-	SessionID           string             `json:"session_id,omitempty"`
-	ThreadID            string             `json:"thread_id,omitempty"`
-	TurnID              string             `json:"turn_id,omitempty"`
-	TurnCount           int                `json:"turn_count,omitempty"`
-	State               string             `json:"state,omitempty"`
-	Status              string             `json:"status,omitempty"`
-	LastEvent           string             `json:"last_event,omitempty"`
-	LastMessage         string             `json:"last_message,omitempty"`
-	LogPath             string             `json:"log_path,omitempty"`
-	Logs                *LogsSnapshot      `json:"logs,omitempty"`
-	RecentAgentMessages []AgentTextMessage `json:"recent_agent_messages,omitempty"`
-	Error               string             `json:"error,omitempty"`
-	Workspace           string             `json:"workspace,omitempty"`
-	StartedAt           *time.Time         `json:"started_at,omitempty"`
-	LastEventAt         *time.Time         `json:"last_event_at,omitempty"`
-	Tokens              *domain.TokenUsage `json:"tokens,omitempty"`
-	Attempts            *AttemptsSnapshot  `json:"attempts,omitempty"`
-	Setup               *SetupSnapshot     `json:"setup,omitempty"`
+	IssueID             string               `json:"issue_id,omitempty"`
+	IssueIdentifier     string               `json:"issue_identifier,omitempty"`
+	IssueURL            *string              `json:"issue_url,omitempty"`
+	Title               string               `json:"title,omitempty"`
+	Phase               string               `json:"phase,omitempty"`
+	SessionID           string               `json:"session_id,omitempty"`
+	ThreadID            string               `json:"thread_id,omitempty"`
+	TurnID              string               `json:"turn_id,omitempty"`
+	TurnCount           int                  `json:"turn_count,omitempty"`
+	MaxTurns            int                  `json:"max_turns,omitempty"`
+	State               string               `json:"state,omitempty"`
+	Status              string               `json:"status,omitempty"`
+	LastEvent           string               `json:"last_event,omitempty"`
+	LastMessage         string               `json:"last_message,omitempty"`
+	LogPath             string               `json:"log_path,omitempty"`
+	Logs                *LogsSnapshot        `json:"logs,omitempty"`
+	RecentAgentMessages []AgentTextMessage   `json:"recent_agent_messages,omitempty"`
+	Error               string               `json:"error,omitempty"`
+	Workspace           string               `json:"workspace,omitempty"`
+	StartedAt           *time.Time           `json:"started_at,omitempty"`
+	RuntimeSeconds      float64              `json:"runtime_seconds,omitempty"`
+	LastEventAt         *time.Time           `json:"last_event_at,omitempty"`
+	Tokens              *domain.TokenUsage   `json:"tokens,omitempty"`
+	Attempts            *AttemptsSnapshot    `json:"attempts,omitempty"`
+	Setup               *SetupSnapshot       `json:"setup,omitempty"`
+	PullRequest         *PullRequestSnapshot `json:"pull_request,omitempty"`
+	sourceIssue         domain.Issue
 }
 type AttemptsSnapshot struct {
 	RestartCount        int `json:"restart_count,omitempty"`
 	CurrentRetryAttempt int `json:"current_retry_attempt,omitempty"`
 }
 type RetrySnapshot struct {
-	IssueID         string         `json:"issue_id"`
-	IssueIdentifier string         `json:"issue_identifier"`
-	IssueURL        *string        `json:"issue_url,omitempty"`
-	Attempt         int            `json:"attempt"`
-	DueAt           time.Time      `json:"due_at"`
-	At              *time.Time     `json:"at,omitempty"`
-	Error           string         `json:"error,omitempty"`
-	Setup           *SetupSnapshot `json:"setup,omitempty"`
+	IssueID         string               `json:"issue_id"`
+	IssueIdentifier string               `json:"issue_identifier"`
+	IssueURL        *string              `json:"issue_url,omitempty"`
+	Title           string               `json:"title,omitempty"`
+	State           string               `json:"state,omitempty"`
+	Attempt         int                  `json:"attempt"`
+	DueAt           time.Time            `json:"due_at"`
+	At              *time.Time           `json:"at,omitempty"`
+	Error           string               `json:"error,omitempty"`
+	Setup           *SetupSnapshot       `json:"setup,omitempty"`
+	PullRequest     *PullRequestSnapshot `json:"pull_request,omitempty"`
+	sourceIssue     domain.Issue
+}
+
+type CompletedSnapshot struct {
+	IssueID             string               `json:"issue_id"`
+	IssueIdentifier     string               `json:"issue_identifier"`
+	IssueURL            *string              `json:"issue_url,omitempty"`
+	Title               string               `json:"title,omitempty"`
+	FinalState          string               `json:"final_state,omitempty"`
+	CompletionReason    string               `json:"completion_reason,omitempty"`
+	TurnCount           int                  `json:"turn_count,omitempty"`
+	MaxTurns            int                  `json:"max_turns,omitempty"`
+	Tokens              *domain.TokenUsage   `json:"tokens,omitempty"`
+	RuntimeSeconds      float64              `json:"runtime_seconds,omitempty"`
+	CompletedAt         time.Time            `json:"completed_at"`
+	RecentAgentMessages []AgentTextMessage   `json:"recent_agent_messages,omitempty"`
+	PullRequest         *PullRequestSnapshot `json:"pull_request,omitempty"`
+	sourceIssue         domain.Issue
+}
+
+type PullRequestSnapshot struct {
+	Provider   string     `json:"provider,omitempty"`
+	Number     int        `json:"number,omitempty"`
+	URL        string     `json:"url,omitempty"`
+	State      string     `json:"state,omitempty"`
+	IsDraft    bool       `json:"is_draft,omitempty"`
+	MergedAt   *time.Time `json:"merged_at,omitempty"`
+	HeadBranch string     `json:"head_branch,omitempty"`
+	Match      string     `json:"match,omitempty"`
 }
 
 type IssueDetailSnapshot struct {
@@ -80,23 +128,35 @@ type IssueDetailSnapshot struct {
 	Tracked             map[string]any     `json:"tracked"`
 }
 
+type IssueEventsSnapshot struct {
+	IssueIdentifier     string             `json:"issue_identifier"`
+	IssueID             string             `json:"issue_id"`
+	Limit               int                `json:"limit"`
+	Truncated           bool               `json:"truncated"`
+	RecentEvents        []EventSnapshot    `json:"recent_events"`
+	RecentAgentMessages []AgentTextMessage `json:"recent_agent_messages,omitempty"`
+}
+
 type SetupSnapshot struct {
-	IssueID         string        `json:"issue_id"`
-	IssueIdentifier string        `json:"issue_identifier"`
-	IssueURL        *string       `json:"issue_url,omitempty"`
-	Title           string        `json:"title,omitempty"`
-	State           string        `json:"state,omitempty"`
-	Attempt         int           `json:"attempt,omitempty"`
-	Stage           string        `json:"stage"`
-	Status          string        `json:"status"`
-	Hook            string        `json:"hook,omitempty"`
-	Workspace       string        `json:"workspace,omitempty"`
-	FailedWorkspace string        `json:"failed_workspace,omitempty"`
-	Error           string        `json:"error,omitempty"`
-	LogPath         string        `json:"log_path,omitempty"`
-	Logs            []LogSnapshot `json:"logs,omitempty"`
-	StartedAt       *time.Time    `json:"started_at,omitempty"`
-	UpdatedAt       time.Time     `json:"updated_at"`
+	IssueID         string               `json:"issue_id"`
+	IssueIdentifier string               `json:"issue_identifier"`
+	IssueURL        *string              `json:"issue_url,omitempty"`
+	Title           string               `json:"title,omitempty"`
+	State           string               `json:"state,omitempty"`
+	Attempt         int                  `json:"attempt,omitempty"`
+	Phase           string               `json:"phase,omitempty"`
+	Stage           string               `json:"stage"`
+	Status          string               `json:"status"`
+	Hook            string               `json:"hook,omitempty"`
+	Workspace       string               `json:"workspace,omitempty"`
+	FailedWorkspace string               `json:"failed_workspace,omitempty"`
+	Error           string               `json:"error,omitempty"`
+	LogPath         string               `json:"log_path,omitempty"`
+	Logs            []LogSnapshot        `json:"logs,omitempty"`
+	StartedAt       *time.Time           `json:"started_at,omitempty"`
+	UpdatedAt       time.Time            `json:"updated_at"`
+	PullRequest     *PullRequestSnapshot `json:"pull_request,omitempty"`
+	sourceIssue     domain.Issue
 }
 
 type WorkspaceSnapshot struct {

@@ -78,6 +78,22 @@ func Validate(cfg Effective) error {
 	if cfg.ServerPortSet && cfg.ServerPort < 0 {
 		errs = append(errs, errors.New("server.port must be non-negative"))
 	}
+	switch cfg.PullRequests.Provider {
+	case "", "none":
+	case "github":
+		if cfg.PullRequests.GitHubRepository == "" {
+			errs = append(errs, errors.New("server.pull_requests.github_repository is required when provider is github"))
+		}
+	case "local":
+		if cfg.PullRequests.LocalPath == "" {
+			errs = append(errs, errors.New("server.pull_requests.local_path is required when provider is local"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("unsupported server.pull_requests.provider %q", cfg.PullRequests.Provider))
+	}
+	if cfg.PullRequests.Provider != "" && cfg.PullRequests.Provider != "none" && cfg.PullRequests.CacheTTL <= 0 {
+		errs = append(errs, errors.New("server.pull_requests.cache_ttl_ms must be positive"))
+	}
 	return errors.Join(errs...)
 }
 

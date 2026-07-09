@@ -16,6 +16,7 @@ import (
 	"github.com/tptodorov/symphony/go/internal/domain"
 	"github.com/tptodorov/symphony/go/internal/observability"
 	"github.com/tptodorov/symphony/go/internal/orchestrator"
+	"github.com/tptodorov/symphony/go/internal/pullrequest"
 	"github.com/tptodorov/symphony/go/internal/server"
 	"github.com/tptodorov/symphony/go/internal/tracker"
 	"github.com/tptodorov/symphony/go/internal/tracker/beads"
@@ -40,6 +41,8 @@ type App struct {
 	Orch *orchestrator.Orchestrator
 	cfg  config.Effective
 }
+
+var listenTCP = net.Listen
 
 func New(ctx context.Context, opt Options) (*App, error) {
 	if opt.WorkflowPath == "" {
@@ -71,6 +74,11 @@ func New(ctx context.Context, opt Options) (*App, error) {
 	startupCleanup(ctx, cfg, tr, wm, opt.Logger)
 	o := orchestrator.NewWithLogger(cfg, tr, runner, wm, opt.Logger)
 	o.SetLogsRoot(opt.LogsRoot)
+	prResolver, err := pullrequest.NewResolver(cfg, opt.Logger)
+	if err != nil {
+		return nil, err
+	}
+	o.SetPullRequestResolver(prResolver)
 	app := &App{Opt: opt, Orch: o, cfg: cfg}
 	go app.watch(ctx)
 	return app, nil
@@ -88,7 +96,7 @@ func (a *App) Run(ctx context.Context) error {
 		if port < 0 {
 			return fmt.Errorf("server.port must be non-negative")
 		}
-		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		ln, err := listenTCP("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if err != nil {
 			return fmt.Errorf("start status server: %w", err)
 		}
@@ -136,6 +144,14 @@ func (a *App) watch(ctx context.Context) {
 				continue
 			}
 			a.Orch.UpdateConfig(cfg)
+			prResolver, err := pullrequest.NewResolver(cfg, a.Opt.Logger)
+			if err != nil {
+				if a.Opt.Logger != nil {
+					observability.ReloadError(a.Opt.Logger, err)
+				}
+				continue
+			}
+			a.Orch.SetPullRequestResolver(prResolver)
 			a.cfg = cfg
 		case <-w.Errors:
 		}
