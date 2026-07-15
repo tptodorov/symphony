@@ -39,6 +39,31 @@ help with the setup:
 See [examples/WORKFLOW.full.md](examples/WORKFLOW.full.md) for a fully expanded workflow
 configuration with Jira, Linear, Beads, Codex, Pi, hooks, polling, workspace, and server settings.
 
+### This repository's workflow
+
+This repository is configured for Symphony-on-Symphony:
+
+- Tracker: Beads, with issue prefix `SYM`.
+- Agent: Codex via `codex app-server`.
+- Workspaces: `.symphony/workspaces/`.
+- Workflow file: `WORKFLOW.md`.
+
+For a fresh clone, prepare Beads and build the local Symphony binary:
+
+```sh
+bd bootstrap --yes
+make build
+```
+
+Run the local workflow:
+
+```sh
+./go/symphony -workdir . -logs-root .symphony/logs WORKFLOW.md
+```
+
+Beads project metadata is tracked under `.beads/`; local Dolt runtime files are ignored by
+`.beads/.gitignore`. Sync shared issue data with `bd dolt pull` and `bd dolt push`.
+
 ### Hook environment
 
 Workflow hooks inherit the Symphony process environment. Environment variables added by Symphony use

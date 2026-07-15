@@ -1,0 +1,3 @@
+sync.remote: "git+https://github.com/tptodorov/symphony.git"
+export.auto: true
+export.git-add: false
