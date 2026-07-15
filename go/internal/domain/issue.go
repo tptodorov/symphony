@@ -21,6 +21,7 @@ type Issue struct {
 	BlockedBy   []BlockerRef
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
+	ClosedAt    *time.Time
 }
 
 type BlockerRef struct {

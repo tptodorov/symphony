@@ -119,8 +119,14 @@ func normalize(m map[string]any) domain.Issue {
 	desc := ptrString(stringField(m, "description"))
 	assignee := ptrString(stringField(m, "assignee", "owner"))
 	p := intPtr(m["priority"])
-	return domain.Issue{ID: id, Identifier: id, Title: stringField(m, "title", "summary"), Description: desc, Priority: p, State: stringField(m, "status", "state"), Assignee: assignee, Labels: domain.NormalizeLabels(stringsSlice(m["tags"])), BlockedBy: blockers(m), CreatedAt: timePtr(stringField(m, "created_at")), UpdatedAt: timePtr(stringField(m, "updated_at"))}
+	return domain.Issue{ID: id, Identifier: id, Title: stringField(m, "title", "summary"), Description: desc, Priority: p, State: stringField(m, "status", "state"), Assignee: assignee, Labels: domain.NormalizeLabels(labelStrings(m)), BlockedBy: blockers(m), CreatedAt: timePtr(stringField(m, "created_at")), UpdatedAt: timePtr(stringField(m, "updated_at")), ClosedAt: timePtr(stringField(m, "closed_at"))}
 }
+
+func labelStrings(m map[string]any) []string {
+	labels := stringsSlice(m["tags"])
+	return append(labels, stringsSlice(m["labels"])...)
+}
+
 func blockers(m map[string]any) []domain.BlockerRef {
 	deps, _ := m["dependencies"].([]any)
 	out := []domain.BlockerRef{}

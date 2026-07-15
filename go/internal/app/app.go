@@ -71,8 +71,8 @@ func New(ctx context.Context, opt Options) (*App, error) {
 		runner = newRunner(cfg)
 	}
 	wm := workspace.NewManager(cfg.WorkspaceRoot)
-	startupCleanup(ctx, cfg, tr, wm, opt.Logger)
 	o := orchestrator.NewWithLogger(cfg, tr, runner, wm, opt.Logger)
+	o.RecordTerminalIssues(startupCleanup(ctx, cfg, tr, wm, opt.Logger))
 	o.SetLogsRoot(opt.LogsRoot)
 	prResolver, err := pullrequest.NewResolver(cfg, opt.Logger)
 	if err != nil {
@@ -157,7 +157,7 @@ func (a *App) watch(ctx context.Context) {
 		}
 	}
 }
-func startupCleanup(ctx context.Context, cfg config.Effective, tr tracker.Tracker, wm workspace.Manager, log *slog.Logger) {
+func startupCleanup(ctx context.Context, cfg config.Effective, tr tracker.Tracker, wm workspace.Manager, log *slog.Logger) []domain.Issue {
 	if err := wm.CleanupPreparationDirs(workspace.PreparationRetention); err != nil && log != nil {
 		log.Warn("workspace preparation cleanup failed", "error", err)
 	}
@@ -169,7 +169,7 @@ func startupCleanup(ctx context.Context, cfg config.Effective, tr tracker.Tracke
 			if log != nil {
 				log.Warn("startup cleanup skipped", "error", err)
 			}
-			return
+			return nil
 		}
 		if log != nil {
 			log.Info("startup cleanup checked existing workspaces", "workspace_count", len(identifiers))
@@ -179,10 +179,12 @@ func startupCleanup(ctx context.Context, cfg config.Effective, tr tracker.Tracke
 			if log != nil {
 				log.Warn("startup cleanup skipped", "error", err)
 			}
-			return
+			return nil
 		}
+		terminalIssues := []domain.Issue{}
 		for identifier, issue := range issues {
 			if containsNorm(cfg.TerminalStates, issue.State) {
+				terminalIssues = append(terminalIssues, issue)
 				if log != nil {
 					log.Info("startup cleanup removing terminal workspace", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "state", issue.State)
 				}
@@ -191,14 +193,14 @@ func startupCleanup(ctx context.Context, cfg config.Effective, tr tracker.Tracke
 				}
 			}
 		}
-		return
+		return terminalIssues
 	}
 	issues, err := tr.FetchByStates(ctx, cfg.TerminalStates)
 	if err != nil {
 		if log != nil {
 			log.Warn("startup cleanup skipped", "error", err)
 		}
-		return
+		return nil
 	}
 	for _, issue := range issues {
 		if log != nil {
@@ -208,6 +210,7 @@ func startupCleanup(ctx context.Context, cfg config.Effective, tr tracker.Tracke
 			log.Warn("workspace cleanup failed", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "error", err)
 		}
 	}
+	return issues
 }
 
 func containsNorm(values []string, state string) bool {

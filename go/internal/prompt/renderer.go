@@ -47,7 +47,7 @@ func issueMap(i domain.Issue) map[string]any {
 		"id": i.ID, "identifier": i.Identifier, "title": i.Title, "description": deref(i.Description),
 		"priority": i.Priority, "state": i.State, "branch_name": deref(i.BranchName), "assignee": deref(i.Assignee),
 		"url": deref(i.URL), "labels": domain.NormalizeLabels(i.Labels), "blocked_by": blockers,
-		"created_at": i.CreatedAt, "updated_at": i.UpdatedAt,
+		"created_at": i.CreatedAt, "updated_at": i.UpdatedAt, "closed_at": i.ClosedAt,
 	}
 }
 

@@ -890,26 +890,87 @@ func (o *Orchestrator) recordCompletedLocked(issue domain.Issue, r running, elap
 		return
 	}
 	completedAt := time.Now()
+	row := completedSnapshotForIssue(issue, completedAt, reason)
+	row.TurnCount = r.turnCount
+	row.MaxTurns = r.maxTurns
+	row.RuntimeSeconds = elapsed.Seconds()
+	row.RecentAgentMessages = append([]AgentTextMessage(nil), r.agentTextTail...)
+	if r.agentTotalTokens != 0 || r.agentInputTokens != 0 || r.agentOutputTokens != 0 {
+		row.Tokens = &domain.TokenUsage{InputTokens: r.agentInputTokens, OutputTokens: r.agentOutputTokens, TotalTokens: r.agentTotalTokens}
+	}
+	o.appendCompletedRowLocked(row)
+}
+
+func (o *Orchestrator) RecordTerminalIssues(issues []domain.Issue) {
+	if len(issues) == 0 {
+		return
+	}
+	now := time.Now()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	cfg := o.cfg
+	for _, issue := range issues {
+		if !containsNorm(cfg.TerminalStates, issue.State) || !trackerIssueInDashboardScope(issue, cfg) || o.hasCompletedRowLocked(issue) {
+			continue
+		}
+		completedAt, ok := trackerCompletedAt(issue)
+		if !ok || !sameLocalDay(completedAt, now) {
+			continue
+		}
+		o.appendCompletedRowLocked(completedSnapshotForIssue(issue, completedAt, "terminal_tracker_state"))
+	}
+}
+
+func completedSnapshotForIssue(issue domain.Issue, completedAt time.Time, reason string) CompletedSnapshot {
 	row := CompletedSnapshot{
-		IssueID:             issue.ID,
-		IssueIdentifier:     issue.Identifier,
-		Title:               issue.Title,
-		FinalState:          issue.State,
-		CompletionReason:    reason,
-		TurnCount:           r.turnCount,
-		MaxTurns:            r.maxTurns,
-		RuntimeSeconds:      elapsed.Seconds(),
-		CompletedAt:         completedAt,
-		RecentAgentMessages: append([]AgentTextMessage(nil), r.agentTextTail...),
-		sourceIssue:         issue,
+		IssueID:          issue.ID,
+		IssueIdentifier:  issue.Identifier,
+		Title:            issue.Title,
+		FinalState:       issue.State,
+		CompletionReason: reason,
+		CompletedAt:      completedAt,
+		sourceIssue:      issue,
 	}
 	if issue.URL != nil {
 		url := *issue.URL
 		row.IssueURL = &url
 	}
-	if r.agentTotalTokens != 0 || r.agentInputTokens != 0 || r.agentOutputTokens != 0 {
-		row.Tokens = &domain.TokenUsage{InputTokens: r.agentInputTokens, OutputTokens: r.agentOutputTokens, TotalTokens: r.agentTotalTokens}
+	return row
+}
+
+func trackerCompletedAt(issue domain.Issue) (time.Time, bool) {
+	if issue.ClosedAt != nil {
+		return *issue.ClosedAt, true
 	}
+	if issue.UpdatedAt != nil {
+		return *issue.UpdatedAt, true
+	}
+	return time.Time{}, false
+}
+
+func trackerIssueInDashboardScope(issue domain.Issue, cfg config.Effective) bool {
+	if strings.TrimSpace(cfg.TrackerAssignee) != "" {
+		if issue.Assignee == nil || domain.NormalizeState(*issue.Assignee) != domain.NormalizeState(cfg.TrackerAssignee) {
+			return false
+		}
+	}
+	labels := domain.NormalizeLabels(issue.Labels)
+	for _, need := range domain.NormalizeLabels(cfg.RequiredLabels) {
+		found := false
+		for _, label := range labels {
+			if label == need {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func (o *Orchestrator) appendCompletedRowLocked(row CompletedSnapshot) {
 	o.completedRows = append(o.completedRows, row)
 	if len(o.completedRows) > completedHistoryLimit {
 		o.completedRows = append([]CompletedSnapshot(nil), o.completedRows[len(o.completedRows)-completedHistoryLimit:]...)
@@ -921,7 +982,10 @@ func (o *Orchestrator) hasCompletedRowLocked(issue domain.Issue) bool {
 		if row.IssueID != issue.ID {
 			continue
 		}
-		if issue.UpdatedAt != nil && issue.UpdatedAt.After(row.CompletedAt) {
+		if issue.ClosedAt != nil && issue.ClosedAt.After(row.CompletedAt) {
+			continue
+		}
+		if issue.ClosedAt == nil && issue.UpdatedAt != nil && issue.UpdatedAt.After(row.CompletedAt) {
 			continue
 		}
 		return true
