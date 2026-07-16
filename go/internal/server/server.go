@@ -263,11 +263,6 @@ button{cursor:pointer;font-family:var(--font-sans);}
 .r-att{font-family:var(--font-mono);font-size:11px;color:var(--hyper-dark);}
 .r-title{font-size:12.5px;color:var(--fg);line-height:1.35;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .r-meta{font-family:var(--font-mono);font-size:11px;color:var(--fg-muted);margin-top:4px;}
-.d-row{padding:10px 11px;background:var(--bg);border:1px solid var(--border);border-radius:6px;}
-.d-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}
-.d-key{font-family:var(--font-mono);font-size:11px;}
-.d-title{font-size:12.5px;color:var(--fg);line-height:1.35;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.d-meta{font-family:var(--font-mono);font-size:10.5px;color:var(--fg-subtle);margin-top:4px;}
 .empty{font-size:12px;color:var(--fg-subtle);padding:4px 0;}
 </style>
 
@@ -294,7 +289,6 @@ button{cursor:pointer;font-family:var(--font-sans);}
     <div class="kpi-tile"><div class="kpi-lbl">Agent run</div><div class="kpi-val" id="kv-r" style="color:var(--blue)">—</div></div>
     <div class="kpi-tile"><div class="kpi-lbl">Post-run hooks</div><div class="kpi-val" id="kv-ph" style="color:#7C1AB3">—</div></div>
     <div class="kpi-tile"><div class="kpi-lbl">Retrying</div><div class="kpi-val" id="kv-rt" style="color:var(--hyper)">—</div></div>
-    <div class="kpi-tile"><div class="kpi-lbl">Done today</div><div class="kpi-val" id="kv-d" style="color:var(--lime-dark)">—</div></div>
     <div class="kpi-tile"><div class="kpi-lbl">Total tokens</div><div class="kpi-val" id="kv-t">—</div></div>
   </div>
 
@@ -331,13 +325,6 @@ button{cursor:pointer;font-family:var(--font-sans);}
           <span class="rail-title" style="color:var(--hyper-dark)">Retry queue <span class="rail-cnt" style="color:var(--fg-subtle)" id="rr-cnt"></span></span>
         </div>
         <div class="rail-rows" id="rr-rows"></div>
-      </div>
-      <div>
-        <div class="rail-hdr">
-          <span class="rail-title">Done today <span class="rail-cnt" id="rd-cnt"></span></span>
-          <span class="rail-hint">landed ↑</span>
-        </div>
-        <div class="rail-rows" id="rd-rows"></div>
       </div>
     </div>
   </div>
@@ -635,29 +622,6 @@ function renderRetry(state){
   document.getElementById('rr-rows').innerHTML=h;
 }
 
-function renderDone(state){
-  var rows=state.completed||[];
-  document.getElementById('rd-cnt').textContent='· '+rows.length;
-  if(!rows.length){document.getElementById('rd-rows').innerHTML='<div class="empty">None yet</div>';return;}
-  var h='';
-  rows.slice().reverse().forEach(function(d){
-    var key=x(d.issue_identifier),href=d.issue_url?x(d.issue_url):'',title=x(d.title||'');
-    var max=maxTurnsFor(d);
-    var turn='turns '+(d.turn_count||0)+(max?'/'+max:'');
-    var tok=d.tokens?fmtTok(d.tokens.total_tokens)+' tok':'0 tok';
-    var meta=turn+' · '+tok+' · '+runtimeFor(d)+' · '+x(fmtTime(d.completed_at));
-    h+='<div class="d-row">'
-      +'<div class="d-top">'
-      +(href?'<a class="lnk d-key" href="'+href+'" target="_blank">'+key+'</a>':'<span class="d-key">'+key+'</span>')
-      +prHtml(d.pull_request,'no PR yet')
-      +'</div>'
-      +'<div class="d-title">'+title+'</div>'
-      +'<div class="d-meta">'+meta+'</div>'
-      +'</div>';
-  });
-  document.getElementById('rd-rows').innerHTML=h;
-}
-
 function renderKpi(state){
   var c=state.counts||{},t=state.agent_totals||{};
   document.getElementById('kv-q').textContent=val(c.ready,'0');
@@ -665,7 +629,6 @@ function renderKpi(state){
   document.getElementById('kv-r').textContent=val(c.running,'0');
   document.getElementById('kv-ph').textContent=val(c.post_run_hooks,'0');
   document.getElementById('kv-rt').textContent=val(c.retrying,'0');
-  document.getElementById('kv-d').textContent=val(c.completed,'0');
   document.getElementById('kv-t').textContent=fmtTok(t.total_tokens||0);
 }
 
@@ -676,7 +639,6 @@ function renderAll(state){
   renderSessions(state);
   renderQueued(state);
   renderRetry(state);
-  renderDone(state);
   document.getElementById('status-label').textContent='running';
   document.getElementById('status-ts').textContent=state.generated_at?new Date(state.generated_at).toLocaleString():'';
 }

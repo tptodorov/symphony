@@ -40,14 +40,16 @@ func TestState(t *testing.T) {
 	if _, ok := body["setup"]; !ok {
 		t.Fatal("state response missing setup")
 	}
-	if _, ok := body["completed"]; !ok {
-		t.Fatal("state response missing completed")
+	if _, ok := body["completed"]; ok {
+		t.Fatal("state response should not expose completed rows")
 	}
 	if runtimeConfig, ok := body["runtime_config"].(map[string]any); !ok || runtimeConfig["agent_max_turns"] == nil || runtimeConfig["dashboard_refresh_ms"] == nil {
 		t.Fatalf("state response missing runtime_config: %#v", body["runtime_config"])
 	}
-	if counts, ok := body["counts"].(map[string]any); !ok || counts["ready"] == nil || counts["setup"] == nil || counts["post_run_hooks"] == nil || counts["completed"] == nil {
+	if counts, ok := body["counts"].(map[string]any); !ok || counts["ready"] == nil || counts["setup"] == nil || counts["post_run_hooks"] == nil {
 		t.Fatalf("state response missing dashboard counts: %#v", body["counts"])
+	} else if _, ok := counts["completed"]; ok {
+		t.Fatalf("state response should not expose completed count: %#v", counts)
 	}
 	if totals, ok := body["agent_totals"].(map[string]any); !ok || totals["total_tokens"] == nil {
 		t.Fatalf("state response missing snake_case agent_totals: %#v", body["agent_totals"])
@@ -197,10 +199,13 @@ func TestDashboardUsesStateAPI(t *testing.T) {
 		t.Fatal(rr.Code)
 	}
 	body := rr.Body.String()
-	for _, want := range []string{"Queued work", "Active sessions", "Total tokens", "/api/v1/state", "symphony-mark.svg", "Retry queue", "Agent run", "Done today", "post_run_hooks", "pull_request", "detailRows", "workspace", "setup log"} {
+	for _, want := range []string{"Queued work", "Active sessions", "Total tokens", "/api/v1/state", "symphony-mark.svg", "Retry queue", "Agent run", "post_run_hooks", "pull_request", "detailRows", "workspace", "setup log"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard missing %q: %s", want, body)
 		}
+	}
+	if strings.Contains(body, "Done today") || strings.Contains(body, "renderDone") {
+		t.Fatalf("dashboard should not include Done today widget: %s", body)
 	}
 }
 

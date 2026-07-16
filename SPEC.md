@@ -2117,8 +2117,8 @@ Requirements:
 - Snapshot data MUST be observability-only. It MUST NOT be required for dispatch, retry scheduling,
   reconciliation, workspace cleanup, or coding-agent correctness.
 - Snapshot rows MUST use real orchestrator, tracker, hook, agent, or configured extension data.
-  Implementations MUST NOT fabricate PRs, token counts, runtime, hook phases, or completed work rows
-  to satisfy a dashboard layout.
+  Implementations MUST NOT fabricate PRs, token counts, runtime, or hook phases to satisfy a
+  dashboard layout.
 - Snapshot consumers MUST be able to render the active lifecycle using this phase order:
   - `prepare`
   - `after_create`
@@ -2201,26 +2201,9 @@ Post-run hook rows:
 - SHOULD include the latest setup snapshot when the retry was caused by setup failure.
 - MAY include `pull_request` when the OPTIONAL PR metadata extension has real data.
 
-`completed` rows:
-
-- HTTP snapshots MUST expose a bounded completion history suitable for a dashboard "Done today"
-  rail.
-- A row is added when a worker exits successfully or when a running issue is reconciled into a
-  terminal tracker state.
-- "Today" is the Symphony process's local calendar day unless the implementation documents another
-  operator-facing timezone.
-- Completion history is observability state. It MUST NOT replace the `completed` bookkeeping set used
-  for dispatch gating.
-- In-memory completion history is sufficient. Persistence across restart is OPTIONAL and
-  implementation-defined.
-- Completed rows SHOULD include issue identity, title, tracker URL, final tracker state when known,
-  completion reason, `turn_count`, final tokens, `runtime_seconds`, `completed_at`, recent agent
-  message tail, and OPTIONAL PR metadata when real data exists.
-
 Agent message/event history:
 
-- Running and completed rows SHOULD include `recent_agent_messages`, capped at 100 messages per row
-  by default.
+- Running rows SHOULD include `recent_agent_messages`, capped at 100 messages per row by default.
 - Each message SHOULD include `at`, `event`, and `text`.
 - Implementations MUST keep message ordering stable within one API version and include timestamps so
   dashboards can render newest-first streams.
@@ -2340,8 +2323,6 @@ Enablement (extension):
   - The text tail SHOULD include at most 100 messages per running job.
   - The dashboard SHOULD refresh this section automatically; short polling of the JSON API is
     sufficient and streaming transport is not required.
-- The dashboard SHOULD include a Completed or Done today section backed by snapshot `completed`
-  rows.
 - If OPTIONAL PR metadata is unavailable, the dashboard SHOULD omit PR chips or show a neutral
   "no PR yet" affordance rather than constructing PR links from issue identifiers or agent text.
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
@@ -2366,8 +2347,7 @@ Minimum endpoints:
         "setup": 1,
         "running": 2,
         "post_run_hooks": 0,
-        "retrying": 1,
-        "completed": 1
+        "retrying": 1
       },
       "runtime_config": {
         "agent_max_turns": 20,
@@ -2477,27 +2457,6 @@ Minimum endpoints:
             "log_path": "/tmp/symphony_workspaces/.failed/MT-650-123/prepare-error.txt",
             "updated_at": "2026-02-24T20:15:10Z"
           }
-        }
-      ],
-      "completed": [
-        {
-          "issue_id": "mno345",
-          "issue_identifier": "MT-648",
-          "issue_url": "https://tracker.example/issues/MT-648",
-          "title": "Ship completed row visibility",
-          "final_state": "Human Review",
-          "completion_reason": "worker_completed",
-          "turn_count": 9,
-          "max_turns": 20,
-          "tokens": {
-            "input_tokens": 1800,
-            "output_tokens": 900,
-            "total_tokens": 2700
-          },
-          "runtime_seconds": 2280.0,
-          "completed_at": "2026-02-24T14:02:00Z",
-          "recent_agent_messages": [],
-          "pull_request": null
         }
       ],
       "agent_totals": {
@@ -2693,8 +2652,6 @@ Recommended matching order:
 2. Otherwise match PR head branches by normalized issue identifier, for example `ABC-123`.
 3. Otherwise, when the provider supports PR search, search PR title/body metadata for the exact
    normalized issue identifier token, for example `ABC-123`.
-4. For completed rows, include merged PRs using the same matching rules.
-
 Identifier search MUST be scoped to the configured repository or repositories. It SHOULD use exact
 token matching and SHOULD NOT treat arbitrary substring matches as authoritative when the provider
 offers a more precise search mode. Implementations SHOULD record the match source, such as
@@ -3440,8 +3397,8 @@ Use the same validation profiles as Section 17:
 - HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - HTTP server extension exposes the dashboard snapshot fields from Section 13.3.1 if shipped,
-  including lifecycle phases, retry row titles, bounded completion history, effective max turns, and
-  capped recent agent messages.
+  including lifecycle phases, retry row titles, effective max turns, and capped recent agent
+  messages.
 - OPTIONAL pull request metadata extension follows Section 13.7.3 when shipped and never affects
   core orchestration behavior.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the

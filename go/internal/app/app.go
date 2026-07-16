@@ -72,7 +72,7 @@ func New(ctx context.Context, opt Options) (*App, error) {
 	}
 	wm := workspace.NewManager(cfg.WorkspaceRoot)
 	o := orchestrator.NewWithLogger(cfg, tr, runner, wm, opt.Logger)
-	o.RecordTerminalIssues(startupCleanup(ctx, cfg, tr, wm, opt.Logger))
+	startupCleanup(ctx, cfg, tr, wm, opt.Logger)
 	o.SetLogsRoot(opt.LogsRoot)
 	prResolver, err := pullrequest.NewResolver(cfg, opt.Logger)
 	if err != nil {

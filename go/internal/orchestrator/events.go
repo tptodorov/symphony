@@ -14,7 +14,6 @@ type Snapshot struct {
 	Running       []RunningSnapshot      `json:"running"`
 	Retrying      []RetrySnapshot        `json:"retrying"`
 	RetryQueue    []RetrySnapshot        `json:"retry_queue,omitempty"`
-	Completed     []CompletedSnapshot    `json:"completed"`
 	Counts        map[string]int         `json:"counts"`
 	AgentTotals   *domain.AgentTotals    `json:"agent_totals,omitempty"`
 	RateLimits    map[string]any         `json:"rate_limits,omitempty"`
@@ -82,23 +81,6 @@ type RetrySnapshot struct {
 	Setup           *SetupSnapshot       `json:"setup,omitempty"`
 	PullRequest     *PullRequestSnapshot `json:"pull_request,omitempty"`
 	sourceIssue     domain.Issue
-}
-
-type CompletedSnapshot struct {
-	IssueID             string               `json:"issue_id"`
-	IssueIdentifier     string               `json:"issue_identifier"`
-	IssueURL            *string              `json:"issue_url,omitempty"`
-	Title               string               `json:"title,omitempty"`
-	FinalState          string               `json:"final_state,omitempty"`
-	CompletionReason    string               `json:"completion_reason,omitempty"`
-	TurnCount           int                  `json:"turn_count,omitempty"`
-	MaxTurns            int                  `json:"max_turns,omitempty"`
-	Tokens              *domain.TokenUsage   `json:"tokens,omitempty"`
-	RuntimeSeconds      float64              `json:"runtime_seconds,omitempty"`
-	CompletedAt         time.Time            `json:"completed_at"`
-	RecentAgentMessages []AgentTextMessage   `json:"recent_agent_messages,omitempty"`
-	PullRequest         *PullRequestSnapshot `json:"pull_request,omitempty"`
-	sourceIssue         domain.Issue
 }
 
 type PullRequestSnapshot struct {

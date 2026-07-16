@@ -52,9 +52,6 @@ func (o *Orchestrator) enrichPullRequests(ctx context.Context, s *Snapshot, reso
 	for i := range s.Retrying {
 		s.Retrying[i].PullRequest = copyPullRequestSnapshot(lookup(s.Retrying[i].sourceIssue))
 	}
-	for i := range s.Completed {
-		s.Completed[i].PullRequest = copyPullRequestSnapshot(lookup(s.Completed[i].sourceIssue))
-	}
 	s.RetryQueue = append([]RetrySnapshot(nil), s.Retrying...)
 }
 

@@ -60,39 +60,32 @@ func TestNewCleansOldPreparationWorkspaces(t *testing.T) {
 	}
 }
 
-func TestNewRecordsClosedTodayIssuesInDashboardSnapshot(t *testing.T) {
+func TestNewCleansTerminalIssueWorkspaces(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join(dir, "work")
+	wm := workspace.NewManager(root)
+	ws, _, err := wm.CreateForIssue("SYM-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	wf := filepath.Join(dir, "WORKFLOW.md")
-	body := "---\ntracker:\n  kind: beads\n  active_states: [ready]\n  terminal_states: [done]\n  required_labels: [symphony-dashboard-validation]\nworkspace:\n  root: " + root + "\n---\nPrompt"
+	body := "---\ntracker:\n  kind: beads\n  active_states: [ready]\n  terminal_states: [done]\nworkspace:\n  root: " + root + "\n---\nPrompt"
 	if err := os.WriteFile(wf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now()
-	year, month, day := now.Local().Date()
-	closedToday := time.Date(year, month, day, 0, 30, 0, 0, now.Location())
-	closedYesterday := closedToday.Add(-24 * time.Hour)
 	tr := &trackerfake.Tracker{Issues: []domain.Issue{
-		{ID: "SYM-1", Identifier: "SYM-1", Title: "Closed today", State: "done", Labels: []string{"symphony-dashboard-validation"}, ClosedAt: &closedToday},
-		{ID: "SYM-2", Identifier: "SYM-2", Title: "Closed yesterday", State: "done", Labels: []string{"symphony-dashboard-validation"}, ClosedAt: &closedYesterday},
-		{ID: "SYM-3", Identifier: "SYM-3", Title: "Closed outside scope", State: "done", Labels: []string{"other"}, ClosedAt: &closedToday},
+		{ID: "SYM-1", Identifier: "SYM-1", Title: "Closed today", State: "done"},
 	}}
 
 	app, err := New(context.Background(), Options{WorkflowPath: wf, Tracker: tr, Runner: &agentfake.Runner{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	sn := app.Orch.Snapshot()
-	if sn.Counts["completed"] != 1 || len(sn.Completed) != 1 {
-		t.Fatalf("closed-today issue missing from completed rows: counts=%+v completed=%+v", sn.Counts, sn.Completed)
+	if _, err := os.Stat(ws.Path); !os.IsNotExist(err) {
+		t.Fatalf("terminal issue workspace should be removed, stat err=%v", err)
 	}
-	row := sn.Completed[0]
-	if row.IssueIdentifier != "SYM-1" || row.Title != "Closed today" || row.FinalState != "done" || row.CompletionReason != "terminal_tracker_state" {
-		t.Fatalf("bad completed row: %+v", row)
-	}
-	if !row.CompletedAt.Equal(closedToday) {
-		t.Fatalf("completed_at = %s, want %s", row.CompletedAt, closedToday)
+	if _, ok := app.Orch.Snapshot().Counts["completed"]; ok {
+		t.Fatal("startup cleanup should not populate completed dashboard count")
 	}
 }
 

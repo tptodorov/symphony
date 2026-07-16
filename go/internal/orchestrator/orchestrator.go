@@ -23,7 +23,6 @@ import (
 )
 
 const promptIncludeMaxBytes = 64 * 1024
-const completedHistoryLimit = 100
 const dashboardRefreshMS = 5000
 const postRunPhaseRetention = 5 * time.Second
 
@@ -47,7 +46,6 @@ type Orchestrator struct {
 	totals        domain.AgentTotals
 	rateLimits    map[string]any
 	runHistory    map[string][]domain.RunAttempt
-	completedRows []CompletedSnapshot
 	pullRequests  PullRequestResolver
 	log           *slog.Logger
 	logsRoot      string
@@ -847,13 +845,6 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 		}
 	}
 	if wasCancelled && !cancelReason.retry {
-		if cancelReason.completed {
-			finalIssue := issue
-			if cancelReason.finalIssue.ID != "" {
-				finalIssue = cancelReason.finalIssue
-			}
-			o.recordCompletedLocked(finalIssue, r, elapsed, "terminal_reconciliation")
-		}
 		if o.log != nil {
 			o.log.Info("worker exit", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "session_id", r.sessionID, "status", finalStatus)
 		}
@@ -861,7 +852,6 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 	}
 	if res.Completed && !wasCancelled {
 		o.completed[issue.ID] = time.Now()
-		o.recordCompletedLocked(issue, r, elapsed, "worker_completed")
 		o.retries[issue.ID] = retryItem{issue: issue, attempt: 1, at: time.Now().Add(time.Second)}
 		if o.log != nil {
 			o.log.Info("worker exit", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "session_id", r.sessionID, "status", finalStatus, "completed", true)
@@ -883,114 +873,6 @@ func (o *Orchestrator) workerExit(issue domain.Issue, res agent.Result, elapsed 
 		o.log.Info("worker exit", "issue_id", issue.ID, "issue_identifier", issue.Identifier, "session_id", r.sessionID, "status", finalStatus, "error", r.error)
 		observability.RetryScheduled(o.log, issue.ID, issue.Identifier, delay)
 	}
-}
-
-func (o *Orchestrator) recordCompletedLocked(issue domain.Issue, r running, elapsed time.Duration, reason string) {
-	if o.hasCompletedRowLocked(issue) {
-		return
-	}
-	completedAt := time.Now()
-	row := completedSnapshotForIssue(issue, completedAt, reason)
-	row.TurnCount = r.turnCount
-	row.MaxTurns = r.maxTurns
-	row.RuntimeSeconds = elapsed.Seconds()
-	row.RecentAgentMessages = append([]AgentTextMessage(nil), r.agentTextTail...)
-	if r.agentTotalTokens != 0 || r.agentInputTokens != 0 || r.agentOutputTokens != 0 {
-		row.Tokens = &domain.TokenUsage{InputTokens: r.agentInputTokens, OutputTokens: r.agentOutputTokens, TotalTokens: r.agentTotalTokens}
-	}
-	o.appendCompletedRowLocked(row)
-}
-
-func (o *Orchestrator) RecordTerminalIssues(issues []domain.Issue) {
-	if len(issues) == 0 {
-		return
-	}
-	now := time.Now()
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	cfg := o.cfg
-	for _, issue := range issues {
-		if !containsNorm(cfg.TerminalStates, issue.State) || !trackerIssueInDashboardScope(issue, cfg) || o.hasCompletedRowLocked(issue) {
-			continue
-		}
-		completedAt, ok := trackerCompletedAt(issue)
-		if !ok || !sameLocalDay(completedAt, now) {
-			continue
-		}
-		o.appendCompletedRowLocked(completedSnapshotForIssue(issue, completedAt, "terminal_tracker_state"))
-	}
-}
-
-func completedSnapshotForIssue(issue domain.Issue, completedAt time.Time, reason string) CompletedSnapshot {
-	row := CompletedSnapshot{
-		IssueID:          issue.ID,
-		IssueIdentifier:  issue.Identifier,
-		Title:            issue.Title,
-		FinalState:       issue.State,
-		CompletionReason: reason,
-		CompletedAt:      completedAt,
-		sourceIssue:      issue,
-	}
-	if issue.URL != nil {
-		url := *issue.URL
-		row.IssueURL = &url
-	}
-	return row
-}
-
-func trackerCompletedAt(issue domain.Issue) (time.Time, bool) {
-	if issue.ClosedAt != nil {
-		return *issue.ClosedAt, true
-	}
-	if issue.UpdatedAt != nil {
-		return *issue.UpdatedAt, true
-	}
-	return time.Time{}, false
-}
-
-func trackerIssueInDashboardScope(issue domain.Issue, cfg config.Effective) bool {
-	if strings.TrimSpace(cfg.TrackerAssignee) != "" {
-		if issue.Assignee == nil || domain.NormalizeState(*issue.Assignee) != domain.NormalizeState(cfg.TrackerAssignee) {
-			return false
-		}
-	}
-	labels := domain.NormalizeLabels(issue.Labels)
-	for _, need := range domain.NormalizeLabels(cfg.RequiredLabels) {
-		found := false
-		for _, label := range labels {
-			if label == need {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
-func (o *Orchestrator) appendCompletedRowLocked(row CompletedSnapshot) {
-	o.completedRows = append(o.completedRows, row)
-	if len(o.completedRows) > completedHistoryLimit {
-		o.completedRows = append([]CompletedSnapshot(nil), o.completedRows[len(o.completedRows)-completedHistoryLimit:]...)
-	}
-}
-
-func (o *Orchestrator) hasCompletedRowLocked(issue domain.Issue) bool {
-	for _, row := range o.completedRows {
-		if row.IssueID != issue.ID {
-			continue
-		}
-		if issue.ClosedAt != nil && issue.ClosedAt.After(row.CompletedAt) {
-			continue
-		}
-		if issue.ClosedAt == nil && issue.UpdatedAt != nil && issue.UpdatedAt.After(row.CompletedAt) {
-			continue
-		}
-		return true
-	}
-	return false
 }
 
 func (o *Orchestrator) reconcile(ctx context.Context) error {
@@ -1032,11 +914,6 @@ func (o *Orchestrator) reconcile(ctx context.Context) error {
 				r.cancel()
 				o.cancelled[id] = cancellationReason{status: domain.RunAttemptCanceled, completed: true, finalIssue: issue}
 				o.completed[id] = time.Now()
-				elapsed := time.Duration(0)
-				if !r.started.IsZero() {
-					elapsed = now.Sub(r.started)
-				}
-				o.recordCompletedLocked(issue, r, elapsed, "terminal_reconciliation")
 				if o.log != nil {
 					observability.Reconciliation(o.log, id, r.issue.Identifier, "terminal_cancel")
 				}
@@ -1119,7 +996,6 @@ func (o *Orchestrator) Snapshot() Snapshot {
 	o.mu.Lock()
 	now := time.Now()
 	setupRows := o.visibleSetupLocked()
-	completedRows := o.completedRowsTodayLocked(now)
 	totals := o.liveAgentTotalsLocked(now)
 	retainedPhaseRows := o.retainedPhaseRowsLocked(now)
 	postRunHooks := o.postRunHookCountLocked() + len(retainedPhaseRows)
@@ -1128,8 +1004,7 @@ func (o *Orchestrator) Snapshot() Snapshot {
 	s := Snapshot{
 		GeneratedAt:   now,
 		RuntimeConfig: &RuntimeConfigSnapshot{AgentMaxTurns: o.cfg.Agent.MaxTurns, DashboardRefreshMS: dashboardRefreshMS},
-		Counts:        map[string]int{"ready": len(o.readyQueue), "setup": len(setupRows), "running": agentRuns, "post_run_hooks": postRunHooks, "retrying": len(o.retries), "completed": len(completedRows)},
-		Completed:     completedRows,
+		Counts:        map[string]int{"ready": len(o.readyQueue), "setup": len(setupRows), "running": agentRuns, "post_run_hooks": postRunHooks, "retrying": len(o.retries)},
 		AgentTotals:   &totals,
 		RateLimits:    o.rateLimits,
 	}
@@ -1200,25 +1075,6 @@ func (o *Orchestrator) retainedPhaseRowsLocked(now time.Time) []RunningSnapshot 
 	return rows
 }
 
-func (o *Orchestrator) completedRowsTodayLocked(now time.Time) []CompletedSnapshot {
-	rows := make([]CompletedSnapshot, 0, len(o.completedRows))
-	for _, row := range o.completedRows {
-		if sameLocalDay(row.CompletedAt, now) {
-			cp := row
-			cp.RecentAgentMessages = append([]AgentTextMessage(nil), row.RecentAgentMessages...)
-			rows = append(rows, cp)
-		}
-	}
-	return rows
-}
-
-func sameLocalDay(a, b time.Time) bool {
-	al, bl := a.Local(), b.Local()
-	ay, am, ad := al.Date()
-	by, bm, bd := bl.Date()
-	return ay == by && am == bm && ad == bd
-}
-
 func (o *Orchestrator) IssueSnapshot(identifier string) (IssueDetailSnapshot, bool) {
 	o.mu.Lock()
 	if issue, status, running, retry, ok := o.issueViewLocked(identifier); ok {
@@ -1274,11 +1130,6 @@ func (o *Orchestrator) issueViewLocked(identifier string) (domain.Issue, string,
 	for _, issue := range o.readyQueue {
 		if issue.Identifier == identifier {
 			return issue, "ready", nil, nil, true
-		}
-	}
-	for _, row := range o.completedRows {
-		if row.IssueIdentifier == identifier {
-			return issueFromCompleted(row), "completed", nil, nil, true
 		}
 	}
 	return domain.Issue{}, "", nil, nil, false
@@ -1437,19 +1288,6 @@ func issueFromSetup(setup SetupSnapshot) domain.Issue {
 		Title:      setup.Title,
 		State:      setup.State,
 		URL:        setup.IssueURL,
-	}
-}
-
-func issueFromCompleted(row CompletedSnapshot) domain.Issue {
-	if row.sourceIssue.ID != "" || row.sourceIssue.Identifier != "" {
-		return row.sourceIssue
-	}
-	return domain.Issue{
-		ID:         row.IssueID,
-		Identifier: row.IssueIdentifier,
-		Title:      row.Title,
-		State:      row.FinalState,
-		URL:        row.IssueURL,
 	}
 }
 

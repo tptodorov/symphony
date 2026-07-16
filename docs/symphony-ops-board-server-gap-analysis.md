@@ -17,10 +17,9 @@ The full visual design still needs server-side spec additions for these areas:
 
 1. PR metadata.
 2. Live post-run hook phases.
-3. Rich "Done today" rows.
-4. Queue wait time and retry titles.
-5. Explicit per-row `max_turns` and runtime fields.
-6. Durable or bounded event history semantics.
+3. Queue wait time and retry titles.
+4. Explicit per-row `max_turns` and runtime fields.
+5. Durable or bounded event history semantics.
 
 ## Already Covered
 
@@ -29,7 +28,7 @@ The full visual design still needs server-side spec additions for these areas:
 - `GET /api/v1/<issue_identifier>` exists for issue runtime/debug detail.
 - `POST /api/v1/refresh` exists for manual poll/reconcile trigger.
 - The dashboard already polls `/api/v1/state` every 5 seconds and renders queued, setup, running,
-  retrying, completed count, and total token KPIs.
+  retrying, and total token KPIs.
 - Running rows already expose `started_at`, `tokens`, `turn_count`, `last_event`, `last_message`,
   log paths, and `recent_agent_messages`.
 
@@ -37,24 +36,22 @@ The full visual design still needs server-side spec additions for these areas:
 
 - Design handoff README, "Data source mapping": identifies `ready`, `setup`, `running`, `retrying`,
   and `agent_totals` as available now, marks activity stream as partial, and marks PR data,
-  post-run hooks, and Done today as unavailable without more server data.
+  and post-run hooks as unavailable without more server data.
 - Design prototype, `Symphony Ops Board.dc.html`: the lifecycle model includes `prepare`,
   `after_create`, `before_run`, `agent_run`, `after_run`, `before_remove`, and `complete`; mock rows
-  include PR state, queued wait time, retry titles, done rows, turns, tokens, runtime, and activity
-  log entries.
+  include PR state, queued wait time, retry titles, turns, tokens, runtime, and activity log entries.
 - `SPEC.md` Section 13.3: current snapshot contract covers `ready`, `setup`, `running`,
   `retrying`, `agent_totals`, and `rate_limits`; it does not define PR metadata, post-run hook rows,
-  or completed row history.
+  or durable event history.
 - `SPEC.md` Section 13.7: current HTTP contract covers `/`, `GET /api/v1/state`,
   `GET /api/v1/<issue_identifier>`, and `POST /api/v1/refresh`.
 - `go/internal/orchestrator/events.go`: current snapshot structs include `Ready`, `Setup`,
   `Running`, `Retrying`, `Counts`, `AgentTotals`, and `RateLimits`. `RunningSnapshot` has
   `RecentAgentMessages`; `RetrySnapshot` does not have `Title` or PR fields.
 - `go/internal/orchestrator/orchestrator.go`: current `completed` state is a map of issue IDs to
-  times and is exposed as `counts.completed`; no completed rows are emitted.
+  times for dispatch bookkeeping only.
 - `go/internal/server/server.go`: current dashboard hardcodes `turn .../20`, renders a five-node
-  lifecycle track, always shows `no PR yet`, renders `Post-run hooks` as unavailable, and renders
-  Done today as count-only.
+  lifecycle track, always shows `no PR yet`, and renders `Post-run hooks` as unavailable.
 
 ## Gaps To Add To `SPEC.md`
 
@@ -67,8 +64,8 @@ Current gap: the spec only requires `turn_count`; the Go dashboard hardcodes `/2
 Spec addition:
 
 - Add `runtime_config` or per-row `max_turns` to `GET /api/v1/state`.
-- Prefer per-row `max_turns` on `running`, `setup`, `retrying`, and `completed` rows if future
-  workflows can reload while rows are active.
+- Prefer per-row `max_turns` on `running`, `setup`, and `retrying` rows if future workflows can
+  reload while rows are active.
 
 Suggested fields:
 
@@ -146,48 +143,10 @@ Suggested row fields:
 }
 ```
 
-### 5. Completion history and "Done today"
+### 5. PR metadata extension
 
-Design need: "Done today" rail rows show issue link, merged PR chip, title, turns, tokens, runtime,
-and completion time.
-
-Current gap: the spec says `completed` is an internal set of issue IDs. The current snapshot exposes
-only a count. It does not preserve title, turn count, final tokens, runtime, PR, or completion time
-as display rows.
-
-Spec addition:
-
-- Add `completed` or `done_today` rows to the snapshot.
-- Define the clock boundary and timezone for "today".
-- Define retention and restart behavior.
-- Keep this as observability state, not required orchestrator state.
-
-Suggested row:
-
-```json
-{
-  "issue_id": "abc123",
-  "issue_identifier": "MT-649",
-  "issue_url": "https://tracker.example/issues/MT-649",
-  "title": "Implement queued work visibility",
-  "completed_at": "2026-07-07T14:02:00Z",
-  "completion_reason": "worker_completed",
-  "final_state": "Human Review",
-  "turn_count": 9,
-  "tokens": {
-    "input_tokens": 1000,
-    "output_tokens": 800,
-    "total_tokens": 1800
-  },
-  "runtime_seconds": 2280,
-  "pull_request": null
-}
-```
-
-### 6. PR metadata extension
-
-Design need: PR chips on active, retry, and done rows with states `mergeable`, `blocked`, `draft`,
-and `merged`.
+Design need: PR chips on active and retry rows with states `mergeable`, `blocked`, `draft`, and
+`merged`.
 
 Current gap: Symphony is a tracker reader/scheduler. The normalized issue model and snapshot do not
 include PR fields. The design handoff correctly marks this as unavailable without a separate
@@ -198,7 +157,7 @@ Spec addition:
 - Add an optional PR metadata extension under the HTTP/status surface.
 - Define config separately from core tracker config.
 - Define failure behavior: PR lookup failures must not affect scheduling.
-- Define row shape shared by running, retrying, and completed rows.
+- Define row shape shared by running and retrying rows.
 
 Suggested row field:
 
@@ -222,15 +181,14 @@ State mapping should be specified. For example:
 - `blocked` when mergeability or checks are not passing.
 - `mergeable` when open, non-draft, and currently mergeable.
 
-### 7. Activity stream history
+### 6. Activity stream history
 
 Design need: expanded cards show newest-first activity streams.
 
 Current state: running rows already include `recent_agent_messages`, capped at 100 in memory.
 
-Remaining gap: the spec should define history bounds, order, and whether completed/retry rows can
-still expose recent messages after a run exits. A durable observability event log would also back
-"Done today" details across restart without becoming orchestrator state.
+Remaining gap: the spec should define history bounds, order, and whether retry rows can still expose
+recent messages after a run exits.
 
 Spec addition:
 
@@ -244,13 +202,11 @@ Spec addition:
 Keep the HTTP server optional for language-level conformance, but strengthen the contract when it is
 implemented:
 
-1. Extend Section 13.3 with row schemas for `ready`, `setup`, `running`, `retrying`, and
-   `completed`.
+1. Extend Section 13.3 with row schemas for `ready`, `setup`, `running`, and `retrying`.
 2. Add a lifecycle `phase` enum and `counts.post_run_hooks`.
 3. Add `runtime_config.agent_max_turns`.
 4. Add optional PR metadata extension fields.
-5. Add completed-row retention semantics.
-6. Add event-history bounds and endpoint semantics.
+5. Add event-history bounds and endpoint semantics.
 
 If the repo adopts the local spec-best-practices rules, add stable requirement IDs such as
 `REQ-OBS-001` rather than adding untracked prose only.

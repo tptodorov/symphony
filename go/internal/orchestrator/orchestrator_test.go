@@ -503,7 +503,8 @@ func TestAfterRunHookIsVisibleInSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, time.Second, func() bool {
-		return len(o.Snapshot().Completed) == 1
+		sn := o.Snapshot()
+		return len(sn.Running) == 1 && sn.Running[0].Phase == "after_run" && sn.Running[0].Status == "completed"
 	})
 	sn = o.Snapshot()
 	if sn.Counts["post_run_hooks"] != 1 || len(sn.Running) != 1 || sn.Running[0].Phase != "after_run" || sn.Running[0].Status != "completed" {
@@ -527,12 +528,13 @@ func TestAfterRunFailureIsLoggedSurfacedAndIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, time.Second, func() bool {
-		return len(o.Snapshot().Completed) == 1
+		sn := o.Snapshot()
+		return len(sn.Running) == 1 && sn.Running[0].Phase == "after_run" && sn.Running[0].Status == "failed"
 	})
 
 	sn := o.Snapshot()
-	if sn.Counts["completed"] != 1 || sn.Counts["post_run_hooks"] != 1 || len(sn.Running) != 1 {
-		t.Fatalf("after_run failure should complete and retain hook row: counts=%+v running=%+v completed=%+v", sn.Counts, sn.Running, sn.Completed)
+	if sn.Counts["post_run_hooks"] != 1 || len(sn.Running) != 1 {
+		t.Fatalf("after_run failure should retain hook row: counts=%+v running=%+v", sn.Counts, sn.Running)
 	}
 	if sn.Running[0].Phase != "after_run" || sn.Running[0].Status != "failed" || !strings.Contains(sn.Running[0].Error, "after run failed") {
 		t.Fatalf("after_run failure not surfaced: %+v", sn.Running[0])
@@ -545,12 +547,10 @@ func TestAfterRunFailureIsLoggedSurfacedAndIgnored(t *testing.T) {
 	}
 }
 
-func TestCompletedSnapshotRecordsWorkerSuccess(t *testing.T) {
+func TestWorkerSuccessMarksCompletedForDispatchBookkeeping(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.Agent.MaxTurns = 9
 	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
-	issueURL := "https://tracker.example/A-1"
-	issue := domain.Issue{ID: "1", Identifier: "A-1", Title: "Done issue", State: "Todo", URL: &issueURL}
+	issue := domain.Issue{ID: "1", Identifier: "A-1", Title: "Done issue", State: "Todo"}
 	started := time.Now().Add(-3 * time.Second)
 	o.mu.Lock()
 	o.running[issue.ID] = running{
@@ -562,31 +562,23 @@ func TestCompletedSnapshotRecordsWorkerSuccess(t *testing.T) {
 		phase:         "agent_run",
 		status:        "running",
 		lastEventType: "session_started",
-		turnCount:     3,
-		maxTurns:      cfg.Agent.MaxTurns,
-		agentTextTail: []AgentTextMessage{{At: started, Event: "message_update", Text: "Finished"}},
 	}
 	o.mu.Unlock()
 
-	o.workerExit(issue, agent.Result{Completed: true, Usage: domain.TokenUsage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18}}, 3*time.Second)
+	o.workerExit(issue, agent.Result{Completed: true}, 3*time.Second)
 
-	sn := o.Snapshot()
-	if sn.Counts["completed"] != 1 || len(sn.Completed) != 1 {
-		t.Fatalf("completed row missing: counts=%+v completed=%+v", sn.Counts, sn.Completed)
+	o.mu.Lock()
+	_, completed := o.completed[issue.ID]
+	o.mu.Unlock()
+	if !completed {
+		t.Fatalf("worker success should update completed dispatch bookkeeping")
 	}
-	row := sn.Completed[0]
-	if row.IssueIdentifier != "A-1" || row.Title != "Done issue" || row.IssueURL == nil || *row.IssueURL != issueURL {
-		t.Fatalf("completed issue fields missing: %+v", row)
-	}
-	if row.CompletionReason != "worker_completed" || row.TurnCount != 3 || row.MaxTurns != cfg.Agent.MaxTurns || row.RuntimeSeconds != 3 {
-		t.Fatalf("completed run fields missing: %+v", row)
-	}
-	if row.Tokens == nil || row.Tokens.TotalTokens != 18 || len(row.RecentAgentMessages) != 1 || row.RecentAgentMessages[0].Text != "Finished" {
-		t.Fatalf("completed token/activity fields missing: %+v", row)
+	if _, ok := o.Snapshot().Counts["completed"]; ok {
+		t.Fatalf("snapshot should not expose completed dashboard count")
 	}
 }
 
-func TestTerminalReconciliationListsDoneBeforeWorkerExit(t *testing.T) {
+func TestTerminalReconciliationMarksCompletedForDispatchBookkeeping(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.TrackerKind = "linear"
 	cfg.ActiveStates = []string{"Todo"}
@@ -623,12 +615,14 @@ func TestTerminalReconciliationListsDoneBeforeWorkerExit(t *testing.T) {
 	}
 
 	sn := o.Snapshot()
-	if sn.Counts["completed"] != 1 || len(sn.Completed) != 1 {
-		t.Fatalf("terminal reconciliation should list done immediately: counts=%+v completed=%+v", sn.Counts, sn.Completed)
+	if _, ok := sn.Counts["completed"]; ok {
+		t.Fatalf("snapshot should not expose completed dashboard count: counts=%+v", sn.Counts)
 	}
-	row := sn.Completed[0]
-	if row.IssueIdentifier != "A-1" || row.FinalState != "Done" || row.CompletionReason != "terminal_reconciliation" || len(row.RecentAgentMessages) != 1 {
-		t.Fatalf("completed row = %+v", row)
+	o.mu.Lock()
+	_, completed := o.completed[issue.ID]
+	o.mu.Unlock()
+	if !completed {
+		t.Fatalf("terminal reconciliation should update completed dispatch bookkeeping")
 	}
 }
 
@@ -689,8 +683,14 @@ func TestBeforeRemoveFailureIsLoggedAndSurfacedWithoutRetry(t *testing.T) {
 
 	o.workerExit(issue, agent.Result{Err: ctx.Err()}, time.Second)
 	sn = o.Snapshot()
-	if sn.Counts["retrying"] != 0 || sn.Counts["completed"] != 1 || len(sn.Completed) != 1 {
-		t.Fatalf("before_remove failure should not retry or block completion: counts=%+v completed=%+v", sn.Counts, sn.Completed)
+	if sn.Counts["retrying"] != 0 {
+		t.Fatalf("before_remove failure should not retry: counts=%+v", sn.Counts)
+	}
+	o.mu.Lock()
+	_, completed := o.completed[issue.ID]
+	o.mu.Unlock()
+	if !completed {
+		t.Fatalf("before_remove failure should not block completed dispatch bookkeeping")
 	}
 }
 
