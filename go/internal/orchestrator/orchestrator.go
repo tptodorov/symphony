@@ -1003,7 +1003,7 @@ func (o *Orchestrator) Snapshot() Snapshot {
 	resolver := o.pullRequests
 	s := Snapshot{
 		GeneratedAt:   now,
-		RuntimeConfig: &RuntimeConfigSnapshot{AgentMaxTurns: o.cfg.Agent.MaxTurns, DashboardRefreshMS: dashboardRefreshMS},
+		RuntimeConfig: &RuntimeConfigSnapshot{ProjectName: o.cfg.ProjectName, AgentMaxTurns: o.cfg.Agent.MaxTurns, DashboardRefreshMS: dashboardRefreshMS},
 		Counts:        map[string]int{"ready": len(o.readyQueue), "setup": len(setupRows), "running": agentRuns, "post_run_hooks": postRunHooks, "retrying": len(o.retries)},
 		AgentTotals:   &totals,
 		RateLimits:    o.rateLimits,

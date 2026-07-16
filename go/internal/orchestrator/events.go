@@ -19,8 +19,9 @@ type Snapshot struct {
 	RateLimits    map[string]any         `json:"rate_limits,omitempty"`
 }
 type RuntimeConfigSnapshot struct {
-	AgentMaxTurns      int `json:"agent_max_turns"`
-	DashboardRefreshMS int `json:"dashboard_refresh_ms,omitempty"`
+	ProjectName        string `json:"project_name"`
+	AgentMaxTurns      int    `json:"agent_max_turns"`
+	DashboardRefreshMS int    `json:"dashboard_refresh_ms,omitempty"`
 }
 type IssueQueueSnapshot struct {
 	IssueID         string               `json:"issue_id"`

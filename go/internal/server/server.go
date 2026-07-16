@@ -270,7 +270,7 @@ button{cursor:pointer;font-family:var(--font-sans);}
   <div id="topbar">
     <div class="brand">
       <img src="/assets/symphony-mark.svg" width="28" height="28" alt="">
-      <span class="brand-name">Symphony</span>
+      <span class="brand-name" id="brand-title">Symphony</span>
     </div>
     <div class="controls">
       <span id="status-text">
@@ -632,9 +632,17 @@ function renderKpi(state){
   document.getElementById('kv-t').textContent=fmtTok(t.total_tokens||0);
 }
 
+function renderProjectTitle(state){
+  var cfg=state.runtime_config||{};
+  var title='Symphony'+(cfg.project_name?' '+cfg.project_name:'');
+  document.title=title;
+  document.getElementById('brand-title').textContent=title;
+}
+
 function renderAll(state){
   if(!state) return;
   lastState=state;
+  renderProjectTitle(state);
   renderKpi(state);
   renderSessions(state);
   renderQueued(state);

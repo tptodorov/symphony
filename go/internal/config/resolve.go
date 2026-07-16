@@ -20,6 +20,7 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 	cfg.PromptIncludeFiles = stringSlice(wf.Config, "prompt.include_files", cfg.PromptIncludeFiles)
 	cfg.WorkflowDir = filepath.Dir(workflowPath)
 	m := wf.Config
+	cfg.ProjectName = str(m, "project.name", cfg.ProjectName)
 	cfg.AgentKind = str(m, "agent_kind", cfg.AgentKind)
 	cfg.TrackerKind = str(m, "tracker.kind", cfg.TrackerKind)
 	cfg.TrackerEndpoint = str(m, "tracker.endpoint", cfg.TrackerEndpoint)
@@ -110,6 +111,10 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 	cfg.EnableLinearGraphQL = cfg.TrackerKind == "linear"
 	cfg.EnableJiraREST = cfg.TrackerKind == "jira"
 	resolveEnvStrings(&cfg)
+	cfg.ProjectName = strings.TrimSpace(cfg.ProjectName)
+	if cfg.ProjectName == "" {
+		cfg.ProjectName = projectNameFromWorkflowPath(workflowPath)
+	}
 	root, err := resolvePath(cfg.WorkspaceRoot, filepath.Dir(workflowPath))
 	if err != nil {
 		return cfg, err
@@ -126,10 +131,22 @@ func Resolve(wf domain.WorkflowDefinition, workflowPath string) (Effective, erro
 }
 
 func resolveEnvStrings(cfg *Effective) {
-	strings := []*string{&cfg.TrackerEndpoint, &cfg.TrackerAPIKey, &cfg.TrackerEmail, &cfg.TrackerProjectKey, &cfg.TrackerProjectSlug, &cfg.TrackerAssignee, &cfg.TrackerBDCommand, &cfg.TrackerJQL, &cfg.WorkspaceRoot, &cfg.Codex.Command, &cfg.Pi.Command, &cfg.Pi.Provider, &cfg.Pi.Model, &cfg.PullRequests.Provider, &cfg.PullRequests.GitHubRepository, &cfg.PullRequests.GitHubToken, &cfg.PullRequests.LocalPath}
+	strings := []*string{&cfg.ProjectName, &cfg.TrackerEndpoint, &cfg.TrackerAPIKey, &cfg.TrackerEmail, &cfg.TrackerProjectKey, &cfg.TrackerProjectSlug, &cfg.TrackerAssignee, &cfg.TrackerBDCommand, &cfg.TrackerJQL, &cfg.WorkspaceRoot, &cfg.Codex.Command, &cfg.Pi.Command, &cfg.Pi.Provider, &cfg.Pi.Model, &cfg.PullRequests.Provider, &cfg.PullRequests.GitHubRepository, &cfg.PullRequests.GitHubToken, &cfg.PullRequests.LocalPath}
 	for _, p := range strings {
 		*p = envRef.ReplaceAllStringFunc(*p, func(s string) string { return os.Getenv(s[1:]) })
 	}
+}
+
+func projectNameFromWorkflowPath(workflowPath string) string {
+	dir := filepath.Dir(workflowPath)
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	name := filepath.Base(filepath.Clean(dir))
+	if name == "." || name == string(filepath.Separator) {
+		return ""
+	}
+	return name
 }
 
 func firstNonEmpty(values ...string) string {

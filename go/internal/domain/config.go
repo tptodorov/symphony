@@ -6,6 +6,7 @@ type EffectiveConfig struct {
 	PromptTemplate      string
 	PromptIncludeFiles  []string
 	WorkflowDir         string
+	ProjectName         string
 	AgentKind           string
 	TrackerKind         string
 	TrackerEndpoint     string
