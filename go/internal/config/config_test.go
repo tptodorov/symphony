@@ -131,6 +131,40 @@ func TestResolvePromptIncludeFiles(t *testing.T) {
 	}
 }
 
+func TestResolveProjectName(t *testing.T) {
+	parent := t.TempDir()
+	workflowPath := filepath.Join(parent, "repo-name", "WORKFLOW.md")
+
+	cfg, err := Resolve(domain.WorkflowDefinition{Config: map[string]any{}}, workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProjectName != "repo-name" {
+		t.Fatalf("project name fallback = %q", cfg.ProjectName)
+	}
+
+	cfg, err = Resolve(domain.WorkflowDefinition{Config: map[string]any{
+		"project": map[string]any{"name": "  "},
+	}}, workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProjectName != "repo-name" {
+		t.Fatalf("empty project name fallback = %q", cfg.ProjectName)
+	}
+
+	t.Setenv("PROJECT_NAME", "AI Terra")
+	cfg, err = Resolve(domain.WorkflowDefinition{Config: map[string]any{
+		"project": map[string]any{"name": "$PROJECT_NAME"},
+	}}, workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProjectName != "AI Terra" {
+		t.Fatalf("project name from workflow = %q", cfg.ProjectName)
+	}
+}
+
 func TestJiraRequiresEndpoint(t *testing.T) {
 	cfg, err := Resolve(domain.WorkflowDefinition{Config: map[string]any{"tracker": map[string]any{"kind": "jira", "email": "user@example.com", "api_token": "token", "project_key": "MOD"}}}, "WORKFLOW.md")
 	if err != nil {

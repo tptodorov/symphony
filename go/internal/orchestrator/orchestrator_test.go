@@ -231,6 +231,7 @@ func TestForwardEventsDoesNotDoubleCountAcrossNonUsageEvents(t *testing.T) {
 func TestRunningSnapshotIncludesLogsAndAgentTextTail(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Agent.MaxTurns = 7
+	cfg.ProjectName = "Symphony Go"
 	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
 	o.SetPullRequestResolver(staticPRResolver{byIdentifier: map[string]*PullRequestSnapshot{
 		"A-1": {Provider: "github", Number: 42, URL: "https://github.com/owner/repo/pull/42", State: "mergeable", Match: "identifier_search"},
@@ -277,7 +278,7 @@ func TestRunningSnapshotIncludesLogsAndAgentTextTail(t *testing.T) {
 	if len(running.RecentAgentMessages) != 100 {
 		t.Fatalf("tail length = %d", len(running.RecentAgentMessages))
 	}
-	if sn.RuntimeConfig == nil || sn.RuntimeConfig.AgentMaxTurns != cfg.Agent.MaxTurns || sn.RuntimeConfig.DashboardRefreshMS != 5000 {
+	if sn.RuntimeConfig == nil || sn.RuntimeConfig.ProjectName != "Symphony Go" || sn.RuntimeConfig.AgentMaxTurns != cfg.Agent.MaxTurns || sn.RuntimeConfig.DashboardRefreshMS != 5000 {
 		t.Fatalf("runtime config missing from snapshot: %+v", sn.RuntimeConfig)
 	}
 	if sn.AgentTotals == nil || sn.AgentTotals.SecondsRunning <= 0 {

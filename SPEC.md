@@ -335,6 +335,7 @@ Returned workflow object:
 
 Top-level keys:
 
+- `project`
 - `tracker`
 - `prompt`
 - `polling`
@@ -353,6 +354,10 @@ Note:
   changing the core schema above.
 - Extensions SHOULD document their field schema, defaults, validation rules, and whether changes
   apply dynamically or require restart.
+
+The optional `project` object MAY contain `name` (string). If `project.name` is absent or resolves
+to an empty string, implementations MUST derive the project name from the folder containing
+`WORKFLOW.md`.
 
 #### 5.3.1 `agent_kind` (string)
 
@@ -2149,6 +2154,8 @@ Common row fields:
 `runtime_config`:
 
 - HTTP snapshots MUST include dashboard-relevant effective runtime settings when known.
+- `project_name` is REQUIRED and contains the effective project name resolved from `project.name` or
+  the folder containing `WORKFLOW.md`.
 - `agent_max_turns` is REQUIRED and contains the effective `agent.max_turns`.
 - `dashboard_refresh_ms` is OPTIONAL and contains the dashboard auto-refresh interval when that
   interval is implementation-defined or configurable.
@@ -2350,6 +2357,7 @@ Minimum endpoints:
         "retrying": 1
       },
       "runtime_config": {
+        "project_name": "Symphony Go",
         "agent_max_turns": 20,
         "dashboard_refresh_ms": 5000
       },
@@ -3114,6 +3122,7 @@ Unless otherwise noted, Sections 17.1 through 17.10 are `Core Conformance`. Bull
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when OPTIONAL values are missing, including tracker-kind state defaults
+- `project.name` is exposed when configured and falls back to the folder containing `WORKFLOW.md`
 - `tracker.kind` validation enforces currently supported kinds (`linear`, `jira`, `beads`)
 - `tracker.api_key` works (including `$VAR` indirection)
 - `tracker.api_token`, `tracker.email`, `tracker.endpoint`, `tracker.project_key`,
