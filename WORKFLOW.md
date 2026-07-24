@@ -40,6 +40,8 @@ hooks:
     source_repo="${SYMPHONY_WORKDIR:?SYMPHONY_WORKDIR is required}"
     branch="$(git -C "$source_repo" branch --show-current || true)"
     remote_url="$(git -C "$source_repo" remote get-url origin 2>/dev/null || true)"
+    workspace_key="$(basename "$PWD")"
+    publish_branch="symphony/$workspace_key"
 
     git clone --no-hardlinks "$source_repo" .
     if [ -n "$remote_url" ]; then
@@ -48,6 +50,15 @@ hooks:
     if [ -n "$branch" ]; then
       git checkout "$branch"
     fi
+
+    if git ls-remote --exit-code --heads origin "$publish_branch" >/dev/null 2>&1; then
+      git fetch origin "$publish_branch:refs/remotes/origin/$publish_branch"
+      git checkout -B "$publish_branch" "origin/$publish_branch"
+    else
+      git checkout -B "$publish_branch"
+    fi
+    git config branch."$publish_branch".remote origin
+    git config branch."$publish_branch".merge "refs/heads/$publish_branch"
 
     if command -v bd >/dev/null 2>&1 && [ -d .beads ]; then
       bd bootstrap --yes >/dev/null 2>&1 || true
@@ -66,6 +77,7 @@ hooks:
     - Source of truth: `SPEC.md`.
     - Go agent guidance: `go/AGENTS.md`.
     - Validation: run `make all` from the repository root before handoff.
+    - Working branch: use the prepared `symphony/<issue-id>` branch; do not publish from `main`.
 
     ## Tracker
 
@@ -79,7 +91,16 @@ hooks:
     - Use `gh` for GitHub access.
     - Do not use GitHub MCP/app connector tools.
 
-    Keep the change small, run relevant checks, and summarize files changed plus validation results.
+    ## Pull Request Publication
+
+    - After implementation and validation, commit the intended workspace changes.
+    - Push the current branch to `origin` with upstream tracking.
+    - Create or update a pull request against `main` with `gh`.
+    - Use a concrete PR title and body that mention the Beads issue, summarize changes, and list validation.
+    - Close the Beads issue only after the PR is published; include the PR URL in the close reason.
+    - If validation, commit, push, or PR creation fails, leave the Beads issue open or in progress and report the blocker.
+
+    Keep the change small, publish a PR, and summarize files changed, validation results, and the PR URL.
     PACKET
   after_run: |
     true
@@ -107,4 +128,4 @@ Description:
 
 Implement the smallest correct change for this issue.
 
-Use the repository's Beads tracker context and Codex workspace guidance. Run the relevant checks, then summarize what changed, what passed, and any follow-up issue or pull request state.
+Use the repository's Beads tracker context and Codex workspace guidance. Run the relevant checks, commit the intended changes, push the prepared branch, and create or update a GitHub pull request against `main`. Close the Beads issue only after the PR is published, and include the PR URL in the close reason and final summary. If you cannot publish the PR, leave the issue open or in progress and report the blocker.

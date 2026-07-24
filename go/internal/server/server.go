@@ -181,7 +181,7 @@ button{cursor:pointer;font-family:var(--font-sans);}
 .btn-sm:hover{background:var(--page-bg);}
 
 /* KPI strip */
-#kpi{display:grid;grid-template-columns:repeat(7,1fr);background:var(--bg);border-bottom:1px solid var(--border);flex:none;}
+#kpi{display:grid;grid-template-columns:repeat(6,1fr);background:var(--bg);border-bottom:1px solid var(--border);flex:none;}
 .kpi-tile{padding:14px 20px;border-right:1px solid var(--border);}
 .kpi-tile:last-child{border-right:none;}
 .kpi-lbl{font-family:var(--font-mono);font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:var(--fg-subtle);}
@@ -623,10 +623,10 @@ function renderRetry(state){
 }
 
 function renderKpi(state){
-  var c=state.counts||{},t=state.agent_totals||{};
+  var c=state.counts||{},t=state.agent_totals||{},cfg=state.runtime_config||{};
   document.getElementById('kv-q').textContent=val(c.ready,'0');
   document.getElementById('kv-p').textContent=val(c.setup,'0');
-  document.getElementById('kv-r').textContent=val(c.running,'0');
+  document.getElementById('kv-r').textContent=val(c.running,'0')+' / '+val(cfg.agent_max_concurrent_agents);
   document.getElementById('kv-ph').textContent=val(c.post_run_hooks,'0');
   document.getElementById('kv-rt').textContent=val(c.retrying,'0');
   document.getElementById('kv-t').textContent=fmtTok(t.total_tokens||0);
@@ -634,7 +634,7 @@ function renderKpi(state){
 
 function renderProjectTitle(state){
   var cfg=state.runtime_config||{};
-  var title='Symphony'+(cfg.project_name?' '+cfg.project_name:'');
+  var title=cfg.project_name||'Symphony';
   document.title=title;
   document.getElementById('brand-title').textContent=title;
 }

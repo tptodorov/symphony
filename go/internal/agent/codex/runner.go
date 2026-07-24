@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tptodorov/symphony/go/internal/agent"
 	"github.com/tptodorov/symphony/go/internal/domain"
@@ -20,6 +21,8 @@ import (
 )
 
 const defaultReadTimeout = 5 * time.Second
+const dynamicToolPayloadMaxBytes = 16 * 1024
+const dynamicToolTruncatedMarker = "\n...[truncated]"
 const continuationPrompt = "Continue working on the same issue. Re-check the tracker state and move the issue toward the workflow-defined handoff state. Do not repeat context already present in this thread."
 
 type Runner struct {
@@ -471,13 +474,66 @@ func (c *appServerClient) handleDynamicToolCall(params json.RawMessage) map[stri
 }
 
 func dynamicToolResult(result tools.ToolResult) map[string]any {
-	b, _ := json.Marshal(result)
+	b, _ := json.Marshal(compactToolResult(result))
 	return map[string]any{"success": result.Success, "contentItems": []map[string]any{{"type": "inputText", "text": string(b)}}}
 }
 
 func dynamicToolFailure(message string) map[string]any {
 	b, _ := json.Marshal(map[string]any{"error": message})
 	return map[string]any{"success": false, "contentItems": []map[string]any{{"type": "inputText", "text": string(b)}}}
+}
+
+func compactToolResult(result tools.ToolResult) map[string]any {
+	out := map[string]any{"success": result.Success}
+	if result.ExitCode != 0 {
+		out["exit_code"] = result.ExitCode
+	}
+	if result.Error != "" {
+		out["error"] = result.Error
+	}
+	if result.ParsedJSON != nil {
+		if raw, err := json.Marshal(result.ParsedJSON); err == nil {
+			if len(raw) <= dynamicToolPayloadMaxBytes {
+				out["parsed_json"] = result.ParsedJSON
+				return compactToolResultWithStderr(out, result)
+			}
+			out["parsed_json_preview"], _ = truncateToolText(string(raw), dynamicToolPayloadMaxBytes)
+			out["truncated"] = true
+			return compactToolResultWithStderr(out, result)
+		}
+	}
+	if result.Stdout != "" {
+		stdout, truncated := truncateToolText(result.Stdout, dynamicToolPayloadMaxBytes)
+		out["stdout"] = stdout
+		if truncated {
+			out["truncated"] = true
+		}
+	}
+	return compactToolResultWithStderr(out, result)
+}
+
+func compactToolResultWithStderr(out map[string]any, result tools.ToolResult) map[string]any {
+	if result.Stderr != "" {
+		stderr, truncated := truncateToolText(result.Stderr, dynamicToolPayloadMaxBytes)
+		out["stderr"] = stderr
+		if truncated {
+			out["truncated"] = true
+		}
+	}
+	if result.Truncated {
+		out["truncated"] = true
+	}
+	return out
+}
+
+func truncateToolText(text string, maxBytes int) (string, bool) {
+	if len(text) <= maxBytes {
+		return text, false
+	}
+	for maxBytes > 0 && !utf8.ValidString(text[:maxBytes]) {
+		maxBytes--
+	}
+	return text[:maxBytes] + dynamicToolTruncatedMarker, true
 }
 
 func parseLinearGraphQLArgs(v any) (string, map[string]any, error) {

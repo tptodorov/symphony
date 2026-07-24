@@ -2157,6 +2157,7 @@ Common row fields:
 - `project_name` is REQUIRED and contains the effective project name resolved from `project.name` or
   the folder containing `WORKFLOW.md`.
 - `agent_max_turns` is REQUIRED and contains the effective `agent.max_turns`.
+- `agent_max_concurrent_agents` is REQUIRED and contains the effective `agent.max_concurrent_agents`.
 - `dashboard_refresh_ms` is OPTIONAL and contains the dashboard auto-refresh interval when that
   interval is implementation-defined or configurable.
 
@@ -2358,6 +2359,7 @@ Minimum endpoints:
       },
       "runtime_config": {
         "project_name": "Symphony Go",
+        "agent_max_concurrent_agents": 10,
         "agent_max_turns": 20,
         "dashboard_refresh_ms": 5000
       },

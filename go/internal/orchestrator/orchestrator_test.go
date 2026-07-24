@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,45 @@ func TestReadyQueueSnapshotUsesDispatchOrder(t *testing.T) {
 	}
 	if sn.Ready[0].CreatedAt == nil || !sn.Ready[0].CreatedAt.Equal(created) || sn.Ready[0].QueuedSince == nil || sn.Ready[0].WaitSeconds == nil {
 		t.Fatalf("ready row timing missing: %+v", sn.Ready[0])
+	}
+}
+
+func TestRunningSnapshotUsesStableStartedOrder(t *testing.T) {
+	cfg := config.Defaults()
+	o := New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
+	base := time.Now()
+	o.mu.Lock()
+	o.running["2"] = running{
+		issue:         domain.Issue{ID: "2", Identifier: "A-2", Title: "Second", State: "Todo"},
+		started:       base.Add(2 * time.Second),
+		lastEvent:     base,
+		status:        "running",
+		lastEventType: "session_started",
+	}
+	o.running["3"] = running{
+		issue:         domain.Issue{ID: "3", Identifier: "A-3", Title: "Third", State: "Todo"},
+		started:       base,
+		lastEvent:     base,
+		status:        "running",
+		lastEventType: "session_started",
+	}
+	o.running["1"] = running{
+		issue:         domain.Issue{ID: "1", Identifier: "A-1", Title: "First", State: "Todo"},
+		started:       base,
+		lastEvent:     base,
+		status:        "running",
+		lastEventType: "session_started",
+	}
+	o.mu.Unlock()
+
+	sn := o.Snapshot()
+	if len(sn.Running) != 3 {
+		t.Fatalf("running count = %d", len(sn.Running))
+	}
+	got := []string{sn.Running[0].IssueIdentifier, sn.Running[1].IssueIdentifier, sn.Running[2].IssueIdentifier}
+	want := []string{"A-1", "A-3", "A-2"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("running order = %v, want %v", got, want)
 	}
 }
 
@@ -278,7 +318,7 @@ func TestRunningSnapshotIncludesLogsAndAgentTextTail(t *testing.T) {
 	if len(running.RecentAgentMessages) != 100 {
 		t.Fatalf("tail length = %d", len(running.RecentAgentMessages))
 	}
-	if sn.RuntimeConfig == nil || sn.RuntimeConfig.ProjectName != "Symphony Go" || sn.RuntimeConfig.AgentMaxTurns != cfg.Agent.MaxTurns || sn.RuntimeConfig.DashboardRefreshMS != 5000 {
+	if sn.RuntimeConfig == nil || sn.RuntimeConfig.ProjectName != "Symphony Go" || sn.RuntimeConfig.AgentMaxConcurrentAgents != cfg.Agent.MaxConcurrentAgents || sn.RuntimeConfig.AgentMaxTurns != cfg.Agent.MaxTurns || sn.RuntimeConfig.DashboardRefreshMS != 5000 {
 		t.Fatalf("runtime config missing from snapshot: %+v", sn.RuntimeConfig)
 	}
 	if sn.AgentTotals == nil || sn.AgentTotals.SecondsRunning <= 0 {
