@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1003,7 +1004,7 @@ func (o *Orchestrator) Snapshot() Snapshot {
 	resolver := o.pullRequests
 	s := Snapshot{
 		GeneratedAt:   now,
-		RuntimeConfig: &RuntimeConfigSnapshot{ProjectName: o.cfg.ProjectName, AgentMaxTurns: o.cfg.Agent.MaxTurns, DashboardRefreshMS: dashboardRefreshMS},
+		RuntimeConfig: &RuntimeConfigSnapshot{ProjectName: o.cfg.ProjectName, AgentMaxConcurrentAgents: o.cfg.Agent.MaxConcurrentAgents, AgentMaxTurns: o.cfg.Agent.MaxTurns, DashboardRefreshMS: dashboardRefreshMS},
 		Counts:        map[string]int{"ready": len(o.readyQueue), "setup": len(setupRows), "running": agentRuns, "post_run_hooks": postRunHooks, "retrying": len(o.retries)},
 		AgentTotals:   &totals,
 		RateLimits:    o.rateLimits,
@@ -1016,6 +1017,19 @@ func (o *Orchestrator) Snapshot() Snapshot {
 		s.Running = append(s.Running, o.runningSnapshotLocked(r))
 	}
 	s.Running = append(s.Running, retainedPhaseRows...)
+	sort.Slice(s.Running, func(i, j int) bool {
+		a, b := s.Running[i], s.Running[j]
+		if a.StartedAt != nil && b.StartedAt != nil && !a.StartedAt.Equal(*b.StartedAt) {
+			return a.StartedAt.Before(*b.StartedAt)
+		}
+		if (a.StartedAt == nil) != (b.StartedAt == nil) {
+			return a.StartedAt != nil
+		}
+		if a.IssueIdentifier != b.IssueIdentifier {
+			return a.IssueIdentifier < b.IssueIdentifier
+		}
+		return a.IssueID < b.IssueID
+	})
 	for _, r := range o.retries {
 		s.Retrying = append(s.Retrying, o.retrySnapshotLocked(r))
 	}

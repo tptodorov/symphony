@@ -22,6 +22,7 @@ import (
 func TestState(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.ProjectName = "Symphony Go"
+	cfg.Agent.MaxConcurrentAgents = 3
 	o := orchestrator.New(cfg, &trackerfake.Tracker{}, &agentfake.Runner{}, workspace.NewManager(t.TempDir()))
 	rr := httptest.NewRecorder()
 	New(o).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/state", nil))
@@ -44,7 +45,7 @@ func TestState(t *testing.T) {
 	if _, ok := body["completed"]; ok {
 		t.Fatal("state response should not expose completed rows")
 	}
-	if runtimeConfig, ok := body["runtime_config"].(map[string]any); !ok || runtimeConfig["project_name"] != "Symphony Go" || runtimeConfig["agent_max_turns"] == nil || runtimeConfig["dashboard_refresh_ms"] == nil {
+	if runtimeConfig, ok := body["runtime_config"].(map[string]any); !ok || runtimeConfig["project_name"] != "Symphony Go" || runtimeConfig["agent_max_concurrent_agents"] != float64(3) || runtimeConfig["agent_max_turns"] == nil || runtimeConfig["dashboard_refresh_ms"] == nil {
 		t.Fatalf("state response missing runtime_config: %#v", body["runtime_config"])
 	}
 	if counts, ok := body["counts"].(map[string]any); !ok || counts["ready"] == nil || counts["setup"] == nil || counts["post_run_hooks"] == nil {
@@ -200,13 +201,19 @@ func TestDashboardUsesStateAPI(t *testing.T) {
 		t.Fatal(rr.Code)
 	}
 	body := rr.Body.String()
-	for _, want := range []string{"Queued work", "Active sessions", "Total tokens", "/api/v1/state", "symphony-mark.svg", "Retry queue", "Agent run", "post_run_hooks", "pull_request", "detailRows", "workspace", "setup log", "brand-title", "project_name"} {
+	for _, want := range []string{"Queued work", "Active sessions", "Total tokens", "/api/v1/state", "symphony-mark.svg", "Retry queue", "Agent run", "agent_max_concurrent_agents", "post_run_hooks", "pull_request", "detailRows", "workspace", "setup log", "brand-title", "project_name"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard missing %q: %s", want, body)
 		}
 	}
+	if strings.Contains(body, "Max agents") {
+		t.Fatalf("dashboard should not include separate Max agents KPI: %s", body)
+	}
 	if strings.Contains(body, "Done today") || strings.Contains(body, "renderDone") {
 		t.Fatalf("dashboard should not include Done today widget: %s", body)
+	}
+	if strings.Contains(body, "Symphony'+(cfg.project_name") {
+		t.Fatalf("dashboard should not add a Symphony prefix to the project name: %s", body)
 	}
 }
 

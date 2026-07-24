@@ -10,9 +10,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tptodorov/symphony/go/internal/agent"
 	"github.com/tptodorov/symphony/go/internal/domain"
+	"github.com/tptodorov/symphony/go/internal/tools"
 )
 
 func TestRunnerCompletesFakeAppServerTurnAndPassesProtocolConfig(t *testing.T) {
@@ -277,6 +279,66 @@ func TestRunnerHandlesBeadsDynamicTool(t *testing.T) {
 	}
 	if text, _ := valueAt(response, "result", "contentItems", 0, "text").(string); !strings.Contains(text, trackerDir) {
 		t.Fatalf("tool response text = %q", text)
+	}
+}
+
+func TestCompactToolResultDoesNotDuplicateParsedJSONStdout(t *testing.T) {
+	result := tools.ToolResult{
+		Success:    true,
+		Stdout:     `{"data":{"issue":{"id":"ISS-1","title":"large issue"}}}`,
+		ParsedJSON: json.RawMessage(`{"issue":{"id":"ISS-1","title":"large issue"}}`),
+	}
+
+	compact := compactToolResult(result)
+	if _, ok := compact["stdout"]; ok {
+		t.Fatalf("compact result should omit stdout when parsed_json exists: %#v", compact)
+	}
+	if _, ok := compact["parsed_json"]; !ok {
+		t.Fatalf("compact result missing parsed_json: %#v", compact)
+	}
+	b, err := json.Marshal(compact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "data") {
+		t.Fatalf("compact result duplicated raw envelope stdout: %s", b)
+	}
+}
+
+func TestCompactToolResultTruncatesOversizedParsedJSON(t *testing.T) {
+	raw := fmt.Sprintf(`{"body":%q}`, strings.Repeat("x", dynamicToolPayloadMaxBytes+1024))
+
+	compact := compactToolResult(tools.ToolResult{
+		Success:    true,
+		ParsedJSON: json.RawMessage(raw),
+	})
+
+	if _, ok := compact["parsed_json"]; ok {
+		t.Fatalf("compact result should not include oversized parsed_json: %#v", compact)
+	}
+	if compact["truncated"] != true {
+		t.Fatalf("compact result should be marked truncated: %#v", compact)
+	}
+	preview, ok := compact["parsed_json_preview"].(string)
+	if !ok || !strings.Contains(preview, "...[truncated]") {
+		t.Fatalf("compact result missing truncated preview: %#v", compact)
+	}
+	if len(preview) > dynamicToolPayloadMaxBytes+len("\n...[truncated]") {
+		t.Fatalf("preview length = %d", len(preview))
+	}
+}
+
+func TestTruncateToolTextPreservesUTF8(t *testing.T) {
+	text, truncated := truncateToolText("ab€cd", 4)
+
+	if !truncated {
+		t.Fatal("expected truncation")
+	}
+	if !strings.HasSuffix(text, dynamicToolTruncatedMarker) {
+		t.Fatalf("missing truncation marker: %q", text)
+	}
+	if !utf8.ValidString(text) {
+		t.Fatalf("truncated text is invalid utf8: %q", text)
 	}
 }
 
